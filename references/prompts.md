@@ -1,0 +1,77 @@
+# 调用提示词与参数覆盖
+
+## 基础调用
+
+```text
+读取 E:\PLAY\主催工具箱\专业软件包\AI折光\SKILL.md，
+使用 C:\Program Files\Adobe\Adobe Photoshop 2020\Photoshop.exe 处理我提供的 PSD。
+按我给的图层分配制作折光纹，标注“不需要加折光纹”的层不生成。
+使用每层的实际可见区域和孔洞，不以矩形边框代替。
+默认最小线宽 0.10 mm、常规线宽 0.15 mm、最小净间隙 0.12 mm，纯黑形状模式。
+纹理随形，有密/中/疏的渐变和分区方向逻辑。
+每个需要折光的原图层单独导出透明 PNG + 可编辑 PSD，
+保留整画布和原点，另交总母版、分配表和验收记录。
+成品尺寸：[填写]；出血：[填写或沿用 PSD]；输出目录：[填写]。
+```
+
+## 局部修改
+
+```text
+沿用上次 job 参数与图层分配，只修改“人物/头发”：
+最小线宽和实际线宽均改为 0.20 mm，最小净间隙仍是 0.12 mm。
+密/中/疏净隙分别 0.15 / 0.25 / 0.40 mm。
+线条顺发束走，减少鱼骨折向，顶部疏、发尾密。
+其他图层保持上版。重新检查头发与邻接纹区的间隙，导出新版本。
+```
+
+```text
+背景改为分区放射纹，中心留白半径 8 mm，主中心位于画布 45% / 35%。
+最小线宽改为 0.15 mm，实际线宽 0.15 mm，最小净间隙改为 0.20 mm。
+密区 0.20、中区 0.30、疏区 0.50 mm。靠中心减少线数，不能聚成黑点。
+“文字”不加折光；文字可见轮廓外扩 0.6 mm 作为所有折光层的全局避让区。
+```
+
+上例中的“顶部疏、发尾密”“减少鱼骨”是由 Codex 解释并落到引导线和密度场的设计指令，不是 Photoshop 内置自然语言功能。不要仅更改参数表而不重新生成路径。
+
+## 参数字典
+
+| 参数 | 单位/类型 | 说明 |
+|---|---|---|
+| enabled | boolean | false 跳过纹理生成 |
+| min_line_mm | mm | 笔画主体线宽下限 |
+| line_mm | mm | 当前实际恒定线宽，必须不低于下限 |
+| min_gap_mm | mm | 所有相邻黑色边缘之间净距离下限 |
+| gap_dense_mm / gap_mid_mm / gap_sparse_mm | mm | 三档净隙，应顺序递增且不低于下限 |
+| pattern | 名称 | flow / chevron / contour / radial / facet / short_curve |
+| direction_deg | deg | 画布向右为 0°，向下为 90°，只适用于可定义全局方向的纹区 |
+| guide_paths | 路径名/坐标 | 随形或局部折向的引导线，优先于全局角度 |
+| density_layout | 文本或场 | 如顶部疏、底部密；需解析为实际场分布 |
+| center_x / center_y | mm 或比例 | 放射/环形中心，注明单位 |
+| inner_radius_mm | mm | 放射中心禁入半径 |
+| boundary_inset_mm | mm | 与纹区边界的额外退让，不替代线与线间隙检查 |
+| exclusions | 路径列表 | 全局不加纹区域；明确哪些图层受其约束 |
+| cap_style | round / butt | 圆头/平头，默认 round；不使用尖尾 |
+| resolution_ppi | ppi | 沿用已有母版；新建建议 600 |
+| export_canvas | full / trim_with_offsets | 默认 full |
+| alpha_mode | antialiased / binary | 默认 antialiased，边缘 RGB 仍必须为黑 |
+| seed | integer | 只有采用有控扰动时使用；记录后应可重复 |
+
+## job.json 记录示例（设计数据，不是自动执行程序）
+
+```json
+{
+  "canvas": {"width_mm": 100, "height_mm": 150, "resolution_ppi": 600},
+  "defaults": {
+    "min_line_mm": 0.10, "line_mm": 0.15, "min_gap_mm": 0.12,
+    "gap_dense_mm": 0.12, "gap_mid_mm": 0.15, "gap_sparse_mm": 0.20,
+    "color": "#000000", "export_canvas": "full"
+  },
+  "layers": [
+    {"source_path": "人物/头发", "enabled": true, "pattern": "flow", "density_layout": "顶部疏，发尾密"},
+    {"source_path": "人物/脸[不加折光]", "enabled": false},
+    {"source_path": "背景", "enabled": true, "pattern": "radial", "inner_radius_mm": 8}
+  ]
+}
+```
+
+这些名称与尺寸仅为示例，不是对用户尚未提供 PSD 的读取结果。脚本样张不读取此 JSON；真正制作时由 Codex 按已解析参数生成/修改当前任务所需路径。
