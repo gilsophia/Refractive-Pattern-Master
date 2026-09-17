@@ -1,4 +1,4 @@
-#target photoshop
+﻿#target photoshop
 /* Independent rectangular samples; not an automatic segmentation tool.
    Closed filled ribbons are native Photoshop shape layers.
    Adjust parameters below as needed. */
@@ -12,25 +12,32 @@
     var previousExportParent = $.global.ZG_EXPORT_PARENT;
     var c=charIDToTypeID, s=stringIDToTypeID, scale=cfg.ppi/25.4;
     var scriptDir = new File($.fileName).parent;
+    function sibling(name) {   // 同目录文件: 先 getFiles 取 File 对象, 再退回手拼路径
+        try { var c = scriptDir.getFiles(name); if (c && c.length) return c[0]; } catch (e0) {}
+        return new File(scriptDir.fsName + '/' + name);
+    }
     function shape(polys, name, group) {
-        var d=new ActionDescriptor(), ref=new ActionReference(); ref.putClass(s('contentLayer')); d.putReference(c('null'),ref);
-        var use=new ActionDescriptor(), fill=new ActionDescriptor(), rgb=new ActionDescriptor();
-        rgb.putDouble(c('Rd  '),0);rgb.putDouble(c('Grn '),0);rgb.putDouble(c('Bl  '),0);
-        fill.putObject(c('Clr '),c('RGBC'),rgb);use.putObject(c('Type'),s('solidColorLayer'),fill);d.putObject(c('Usng'),s('contentLayer'),use);
-        executeAction(c('Mk  '),d,DialogModes.NO);
-        var layer=doc.activeLayer;layer.name=name;
         var subs=[];
         for(var k=0;k<polys.length;k++) {
             var points=[];
             for(var j=0;j<polys[k].length;j++) {var p=new PathPointInfo();p.kind=PointKind.CORNERPOINT;p.anchor=[polys[k][j][0]*scale,polys[k][j][1]*scale];p.leftDirection=p.anchor;p.rightDirection=p.anchor;points.push(p);}
             var sub=new SubPathInfo();sub.closed=true;sub.operation=ShapeOperation.SHAPEADD;sub.entireSubPath=points;subs.push(sub);
         }
+        /* 顺序与 refraction_core.jsx 的 createSolidShape 一致: 先建路径并选中, 再 Mk contentLayer,
+         * 新形状层会自动把当前路径作为矢量蒙版 —— 不要反过来"先建层再挂蒙版":
+         * PS 2020/21.2 上给已带矢量蒙版的层再挂路径会悄悄加出一个位图蒙版(export_groups 会拒收)。 */
         var path=doc.pathItems.add('ZG_temp_path',subs);
-        var mask=new ActionDescriptor();mask.putClass(c('Nw  '),c('Path'));
-        var at=new ActionReference();at.putEnumerated(c('Path'),c('Path'),s('vectorMask'));mask.putReference(c('At  '),at);
-        var using=new ActionReference();using.putName(c('Path'),path.name);mask.putReference(c('Usng'),using);
-        executeAction(c('Mk  '),mask,DialogModes.NO);
-        path.remove();layer.move(group,ElementPlacement.INSIDE);
+        path.select();
+        var d=new ActionDescriptor(), ref=new ActionReference(); ref.putClass(s('contentLayer')); d.putReference(c('null'),ref);
+        var use=new ActionDescriptor(), fill=new ActionDescriptor(), rgb=new ActionDescriptor();
+        rgb.putDouble(c('Rd  '),0);rgb.putDouble(c('Grn '),0);rgb.putDouble(c('Bl  '),0);
+        fill.putObject(c('Clr '),c('RGBC'),rgb);use.putObject(c('Type'),s('solidColorLayer'),fill);d.putObject(c('Usng'),s('contentLayer'),use);
+        executeAction(c('Mk  '),d,DialogModes.NO);
+        var layer=doc.activeLayer;layer.name=name;
+        path.remove();
+        var vr=new ActionReference();vr.putIdentifier(s('layer'),layer.id);var vd=executeActionGet(vr);
+        if(layer.kind!==LayerKind.SOLIDFILL||!vd.hasKey(s('hasVectorMask'))||!vd.getBoolean(s('hasVectorMask')))throw Error('形状层建立失败(缺矢量蒙版): '+name);
+        layer.move(group,ElementPlacement.INSIDE);
         return layer;
     }
     try {
@@ -61,7 +68,7 @@
         doc.saveAs(new File(out.fsName+'/master_shapes.psd'),opts,false,Extension.LOWERCASE);
         var log=new File(out.fsName+'/sample_parameters.txt');log.encoding='UTF8';log.open('w');log.write(info.join('\n'));log.close();
         $.global.ZG_EXPORT_PARENT=out.fsName;
-        $.evalFile(new File(scriptDir.fsName+'/export_groups.jsx'));
+        $.evalFile(sibling('export_groups.jsx'));
         $.global.ZG_LAST_SAMPLE=out.fsName;
     } finally {
         if (typeof previousExportParent === 'undefined') delete $.global.ZG_EXPORT_PARENT;

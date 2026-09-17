@@ -1,4 +1,4 @@
-#target photoshop
+﻿#target photoshop
 /* Export only prepared ZG_OUT__ groups (any nesting depth). Never overwrite source.
  * 母版里的输出组现在按源图层层级嵌套: 只导出"带形状层的纹样组", 纯容器组不单独导出;
  * 命名含不折光标记而被隐藏的组按设计跳过, 并记录到清单。 */
@@ -66,7 +66,8 @@
             var base = pad(j+1) + '__' + safe(groups[j].name);
             var psd = new PhotoshopSaveOptions(); psd.layers = true; psd.embedColorProfile = true; psd.alphaChannels = true;
             tmp.saveAs(new File(out.fsName + '/' + base + '.psd'), psd, true, Extension.LOWERCASE);
-            var png = new PNGSaveOptions(); png.interlaced = false;
+            var png = new PNGSaveOptions(); png.interlaced = false; png.compression = 6;
+            // 不显式设 compression 时 Photoshop 默认按 0(不压缩)存, 线稿 PNG 会比压缩后大数百倍
             tmp.saveAs(new File(out.fsName + '/' + base + '.png'), png, true, Extension.LOWERCASE);
             rows.push([quote(groups[j].name),quote(base),w,h,ppi].join(','));
             tmp.close(SaveOptions.DONOTSAVECHANGES); tmp = null;

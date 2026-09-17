@@ -1,4 +1,4 @@
-#target photoshop
+﻿#target photoshop
 /* 折光纹母版生成宏 (job.json 模式)  — 与 generate_refraction_gui.jsx 共用 refraction_core.jsx
  * 运行: 文件 -> 脚本 -> 浏览 -> generate_refraction.jsx -> 选择 job.json
  * 依据 job.json 的图层分配生成纯黑矢量折光纹, 另存独立母版 PSD。不覆盖源 PSD。 */
@@ -75,8 +75,27 @@
         return v;
     }
 
-    var scriptDir = new File($.fileName).parent.fsName;
-    $.evalFile(new File(scriptDir + '/refraction_core.jsx'));
+    var scriptDir = '';
+    /* 定位同目录的 refraction_core.jsx: 用 $.fileName 推导, 不写死绝对路径。
+     * 先用 Folder.getFiles 取 File 对象(不做路径字符串拼接), 兼容中文路径与不同系统的分隔符。 */
+    function findCore() {
+        var sf = null;
+        try { sf = new File($.fileName); } catch (e0) { sf = null; }
+        if (!sf || !sf.exists || !sf.parent) return null;
+        scriptDir = sf.parent.fsName;
+        try {
+            var cand = sf.parent.getFiles('refraction_core.jsx');
+            if (cand && cand.length) return cand[0];
+        } catch (e1) {}
+        var f = new File(scriptDir + '/refraction_core.jsx');
+        return f.exists ? f : null;
+    }
+    var coreFile = findCore();
+    if (!coreFile) {
+        alert('找不到 refraction_core.jsx。请确认它与 generate_refraction.jsx 在同一个目录里, 并用 文件→脚本→浏览 打开本脚本。' + (scriptDir ? ('\n脚本目录: ' + scriptDir) : ''));
+        return;
+    }
+    $.evalFile(coreFile);
 
     function main() {
         var jobFile = File.openDialog('选择 job.json 配置文件');

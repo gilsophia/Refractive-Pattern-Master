@@ -2,7 +2,7 @@
  * 由 generate_refraction.jsx (job.json 模式) 与 generate_refraction_gui.jsx (手动分配模式) 通过 $.evalFile 共用。
  * 不包含 UI 与 JSON 解析, 只暴露 ZG.generate / ZG.collectLayers 等。 */
 var ZG = {};
-var ZG_CORE_VERSION = '2026-09-17a';   // 便于在 zg_progress.txt 里确认实际运行的版本
+var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实际运行的版本
 
 (function () {
     var c = charIDToTypeID, s = stringIDToTypeID;
@@ -383,16 +383,23 @@ var ZG_CORE_VERSION = '2026-09-17a';   // 便于在 zg_progress.txt 里确认实
         executeAction(c('Mk  '), mask, DialogModes.NO);
     }
     /* 把路径挂成图层/组的矢量蒙版。
-     * 不同 Photoshop 版本对「建立: 路径 → 矢量蒙版」的写法略有差异, 依次尝试几种写法,
-     * 全部失败才抛出; 记住首次成功的写法, 后续层不再重复试错。 */
+     * 不同 Photoshop 版本对「建立: 路径 → 矢量蒙版」的写法差异很大, 依次尝试几种写法,
+     * 每种都回读 hasVectorMask 确认真的建出来了才采纳 —— 有的写法(如 At=mask)在 2020 上
+     * 不报错但也什么都不建, 只看"没抛异常"会误判成功。全部失败才抛出;
+     * 记住首次成功的写法, 后续层不再重复试错。
+     * 实测(PS 2020 / 21.2, 目标为组): 写法0(At=vectorMask + Usng=Trgt) 可用且只建矢量蒙版;
+     * 写法1(按路径名引用) 报「命令"建立:"当前不可用」; 写法2(At=mask) 无效果。 */
     var vectorMaskMode = -1;
     function applyVectorMask(doc, target, path) {
         var order = vectorMaskMode >= 0 ? [vectorMaskMode, 0, 1, 2] : [0, 1, 2];
         var lastErr = null;
         for (var i = 0; i < order.length; i++) {
             if (i > 0 && order[i] === order[0]) continue;
-            try { applyVectorMaskOnce(doc, target, path, order[i]); vectorMaskMode = order[i]; return; }
-            catch (e) { lastErr = e; }
+            try {
+                applyVectorMaskOnce(doc, target, path, order[i]);
+                if (hasVectorMask(target)) { vectorMaskMode = order[i]; return; }
+                lastErr = new Error('写法 ' + order[i] + ' 没有建立矢量蒙版');
+            } catch (e) { lastErr = e; }
         }
         throw new Error(lastErr && lastErr.message ? lastErr.message : String(lastErr));
     }

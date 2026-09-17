@@ -1,10 +1,26 @@
-#target photoshop
+﻿#target photoshop
 /* 折光纹工具箱 / Refraction pattern master — 母版生成宏 (手动分配模式, 不需要 job.json)
  * 运行: 文件 -> 脚本 -> 浏览 -> generate_refraction_gui.jsx
  * 列出源 PSD 全部图层, 弹窗逐层勾选启用、选纹样、填参数, 点生成即可产出独立母版 PSD。
  * 使用模态 dialog (可靠常驻) + 紧凑多列布局, 避免窗口过长。 */
 (function () {
-    var scriptDir = new File($.fileName).parent.fsName;
+    var scriptDir = '';
+    /* 定位同目录的 refraction_core.jsx。
+     * 用 $.fileName(本脚本被运行时的真实路径) 推导, 不写死任何绝对路径, 换电脑/换目录都能用。
+     * 先用 Folder.getFiles 直接取 File 对象(不做路径字符串拼接), 这样中文/非 ASCII 路径、
+     * Windows 反斜杠与 macOS 正斜杠的差异都不会出问题; 取不到再退回手拼路径。 */
+    function findCore() {
+        var sf = null;
+        try { sf = new File($.fileName); } catch (e0) { sf = null; }
+        if (!sf || !sf.exists || !sf.parent) return null;
+        scriptDir = sf.parent.fsName;
+        try {
+            var cand = sf.parent.getFiles('refraction_core.jsx');
+            if (cand && cand.length) return cand[0];
+        } catch (e1) {}
+        var f = new File(scriptDir + '/refraction_core.jsx');
+        return f.exists ? f : null;
+    }
 
     var PATTERNS = ['parallel', 'facet', 'flow', 'wave', 'zigzag', 'chevron', 'feather', 'herringbone', 'bilateral_flow', 'meander', 'contour', 'topographic', 'radial', 'fan', 'cone', 'sunburst', 'concentric', 'ripple', 'spiral', 'vortex', 'petal_rosette', 'diamond_lattice', 'diamond_tri', 'moire_radial', 'triangle_lattice', 'hex_lattice', 'checker', 'carbon_fiber', 'scale', 'dash_field', 'dot_field', 'short_curve'];
     /* 纹样键 -> 中文名(取自 references/design-logic.md 的定稿命名)。下拉菜单显示中文, 内部仍用键名传参。 */
@@ -61,7 +77,7 @@
         dlg.alignChildren = 'left';
         dlg.preferredSize.width = 680;
 
-        dlg.add('statictext', undefined, '源: ' + src.name + '  (共 ' + infos.length + ' 层; 最小线宽固定 ' + MIN_LINE_MM + ' mm)');
+        dlg.add('statictext', undefined, '源: ' + src.name + '   Photoshop ' + app.version + '  (共 ' + infos.length + ' 层; 最小线宽固定 ' + MIN_LINE_MM + ' mm)');
 
         // ---- 图层列表 ----
         dlg.add('statictext', undefined, '图层分配（点选一行编辑；列表即生成顺序：子层优先，组容器排在其子层之后；隐藏层、整图合成层和明确排除层默认不生成）');
@@ -267,18 +283,21 @@
     }
 
     try {
-        $.evalFile(new File(scriptDir + '/refraction_core.jsx'));
+        var coreFile = findCore();
+        if (!coreFile) throw new Error('找不到 refraction_core.jsx。请确认它与 generate_refraction_gui.jsx 在同一个目录里, 并用 文件→脚本→浏览 打开本脚本。' + (scriptDir ? ('\n脚本目录: ' + scriptDir) : '\n(无法确定脚本目录: $.fileName 为空, 可能不是用 文件→脚本 运行的)'));
+        $.evalFile(coreFile);
         main();
     } catch (e) {
         var msg = (e && e.message) ? e.message : String(e);
         var loc = '';
         if (e && e.fileName) loc += '\n文件: ' + e.fileName;
         if (e && e.line !== undefined) loc += '\n行: ' + e.line;
-        try {
+        var wroteLog = false;
+        if (scriptDir) try {
             var lf = new File(scriptDir + '/zg_error_log.txt');
             lf.encoding = 'UTF8';
-            if (lf.open('w')) { lf.write(msg + loc); lf.close(); }
+            if (lf.open('w')) { lf.write(msg + loc); lf.close(); wroteLog = true; }
         } catch (e2) {}
-        alert('折光纹宏出错:\n' + msg + loc + '\n\n详情已写入脚本目录 zg_error_log.txt');
+        alert('折光纹宏出错:\n' + msg + loc + (wroteLog ? '\n\n详情已写入脚本目录 zg_error_log.txt' : ''));
     }
 }());

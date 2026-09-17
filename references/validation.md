@@ -147,6 +147,20 @@ pathContents(pathClass) → pathComponents(LIST)
 
 区域读取核对（排除「轮廓读取坏了」的怀疑）：对同一份 PSD 直接调 `getRegionSubs` 复核 8 个图层，子路径数与 008 日志**完全一致**（Silver（不做折光）2170、Tudor roses-red stamp 144、bg-2 67、Queen（不做折光）234、图层 4 = 14、图层 5 = 2137、羊皮纸背景 副本 1、BG 3），bbox 也落在卡面范围内；合成图里出现的矩形来自测试文档本身画的矩形层，不是读取问题。
 
+### 可移植性处理（2026-09-17，准备对外分享）
+
+- **所有 `.jsx` 统一为 UTF-8 带 BOM**：ExtendScript 对无 BOM 文件按系统区域编码解释，非 UTF-8 区域设置下中文（不折光标记、界面文案）会变乱码、标记匹配会失效。本机（系统 ANSI 为 UTF-8）无 BOM 也能跑，因此这个坑只在别人机器上出现，已全部补 BOM。
+- **入口脚本改用 `$.fileName` + `Folder.getFiles` 定位同目录的 `refraction_core.jsx`**（不再手拼路径字符串），找不到时给出明确提示；`sample_shapes.jsx` 定位 `export_groups.jsx` 同样处理。脚本内无任何写死的盘符/绝对路径（job.json 的 `source_psd`/`output_dir` 是用户数据，需自行修改）。
+- **新增 `scripts/selftest_core.jsx`**：不建文档的纯函数自检（标记识别、蒙版简化、摩尔纹中心），结果写同目录 `selftest_result.txt` 并弹窗摘要，供他人换机后先验证环境。
+- 文档去掉了本机绝对路径（`工作流.md`、`references/参数与示例.md`），新增 `README.md` 与「运行环境与移植」一节（含「`scripts/` 不能拆开」「job.json 换机要改路径」「图层名含 `/` 会被记 MISSING」等已知限制）。
+
+### 蒙版与导出写法实测（2026-09-17，PS 2020 / 21.2）
+
+- **路径→矢量蒙版：三种写法在「组」上的实测结果**。写法0（`Mk` class=`Path`，`At`=`vectorMask`，`Usng`=`Ordn/Trgt`）**可用且只建矢量蒙版**（`hasVectorMask=true`、`hasUserMask=false`）；写法1（`Usng` 按路径名）报「命令"建立:"当前不可用」；写法2（`At`=`mask`）不报错但**什么都不建**。因此 `applyVectorMask` 改为每种写法执行后**回读 `hasVectorMask` 确认**才采纳，避免"没抛异常就算成功"的误判。
+- **形状层的正确建法**：先 `pathItems.add` 并 `path.select()`，再 `Mk contentLayer` —— 新形状层会自动把当前路径作为矢量蒙版（核心 `createSolidShape` 就是这个顺序）。反过来"先建层、再把路径挂上去"在 2020 上会悄悄多出一个**位图蒙版**，`export_groups.jsx` 会按规范拒收（`Pixel mask requires separate disclosed workflow`）。`sample_shapes.jsx` 原先就是旧顺序 + 旧写法，在本机直接跑不通（「建立: 当前不可用」），已按核心的顺序重写；重写后样例脚本可完整跑通，并成功调用 `export_groups.jsx` 导出 3 组。
+- **`psd_tools` 读组会误报位图蒙版**：组记录里的蒙版块为空时 `psd_tools` 仍返回一个 `Mask` 对象；判断有无位图蒙版应以 Photoshop 自己的 ActionManager（`hasUserMask`）为准。实测 008 母版 31 个 `ZG_OUT__` 组 `hasUserMask` 全为 false（psd_tools 却报了 27 个"rasterMask=True"）。
+- **导出 PNG 必须显式设压缩**：`PNGSaveOptions` 不设 `compression` 时 Photoshop 按 0（不压缩）保存，线稿 PNG 会大数百倍。`export_groups.jsx` 已设 `compression = 6`：同一张 600×900 线稿实测 2,162,868 → 5,711 字节；样例导出从 10,047,662 降到 14,348～229,502 字节。
+
 ### 输出组嵌套与容器组（2026-09-16）
 
 需求是「输出组按源图层层级嵌套、只关联父子级、不加剪辑蒙版」。实测要点：
