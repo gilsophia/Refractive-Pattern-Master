@@ -449,8 +449,8 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
                 if (group.artLayers.length) {
                     patternHosts++;
                     if (requireRegionMask && !hasVectorMask(group)) throw new Error(group.name + ': 缺少区域矢量蒙版');
-                    for (var ai = 0; ai < group.artLayers.length; ai++) {
-                        var layer = group.artLayers[ai];
+                    for (var gi2 = 0; gi2 < group.artLayers.length; gi2++) {
+                        var layer = group.artLayers[gi2];
                         if (layer.kind !== LayerKind.SOLIDFILL || !hasVectorMask(layer))
                             throw new Error(group.name + '/' + layer.name + ': 检测到像素层或无矢量蒙版图层');
                         var bd = layer.bounds, l = toNum(bd[0]), t = toNum(bd[1]), r = toNum(bd[2]), b = toNum(bd[3]);
@@ -506,7 +506,7 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
     var NO_REFRACTION_RE = /不加折光|不需要折光|不需要加折光纹|不折光|不做折光|不要折光|不用折光|无需折光|无须折光|不需折光|免折光|不压纹|不加纹|无纹|不做|不用|不要|跳过|no[\s_-]?refraction|\[skip\]|\bskip\b/i;
     function isNoRefraction(name) { return NO_REFRACTION_RE.test(String(name == null ? '' : name)); }
 
-    /* ---------------- 启发式建议 (无外部 AI) ---------------- */
+    /* ---------------- 启发式建议 (本地规则) ---------------- */
     function suggest(info, canvasW, canvasH) {
         var name = String(info.name || '');
         var bd = info.bounds;
@@ -1531,7 +1531,7 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
                 else if (pattern === 'dot_field') polys = genDots(b, cfg);
                 else if (pattern === 'short_curve') polys = genShortCurve(b, cfg);
                 else if (pattern === 'interlace' || pattern === 'braid' || pattern === 'cube_iso' || pattern === 'guilloche' || pattern === 'organic_field' || pattern === 'moire_pair' || pattern === 'angle_switch' || pattern === 'density_switch' || pattern === 'latent_image' || pattern === 'image_switch')
-                    throw new Error(srcPath + ': 纹样 ' + pattern + ' 为设计意图, 宏内尚未实现, 请走 SKILL 全流程手工制作。');
+                    throw new Error(srcPath + ': 纹样 ' + pattern + ' 为设计意图, 宏内尚未实现, 请按《工作流》手工制作。');
                 else throw new Error(srcPath + ': 未知纹样 ' + pattern);
 
                 polys = normalizePolys(polys);   // 压到 Photoshop 单子路径 1000 点上限内

@@ -1,7 +1,7 @@
 #target photoshop
 /* Independent rectangular samples; not an automatic segmentation tool.
    Closed filled ribbons are native Photoshop shape layers.
-   Adjust parameters below or ask Codex to regenerate them from a prompt. */
+   Adjust parameters below as needed. */
 (function () {
     var cfg = { minLine:0.10, line:0.15, minGap:0.12, dense:0.12, sparse:0.20, ppi:600, width:90, height:50 };
     if (cfg.line < cfg.minLine || cfg.dense < cfg.minGap || cfg.sparse < cfg.dense) throw Error('Inconsistent minimum width/gap settings.');

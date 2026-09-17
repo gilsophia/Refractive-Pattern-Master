@@ -1,11 +1,11 @@
 # 折光纹母版生成宏
 
-把 SKILL 里**确定性的几何生成 + 图层构造 + 母版输出**一段封装成 Photoshop 内可直接运行的宏。几何与图层构造由 `scripts/refraction_core.jsx` 提供，两个入口共用：
+把 [工作流](../工作流.md) 里**确定性的几何生成 + 图层构造 + 母版输出**一段封装成 Photoshop 内可直接运行的宏。几何与图层构造由 `scripts/refraction_core.jsx` 提供，两个入口共用：
 
 | 入口 | 适用 | 说明 |
 |---|---|---|
-| `generate_refraction_gui.jsx` | **不依赖 AI** | 弹窗列出源 PSD 全部图层，逐层勾选启用、选纹样、填参数，点生成即出母版 |
-| `generate_refraction.jsx` | AI 产 `job.json` 后 | 读 `job.json` 图层分配，按配置生成 |
+| `generate_refraction_gui.jsx` | **不需要外部配置** | 弹窗列出源 PSD 全部图层，逐层勾选启用、选纹样、填参数，点生成即出母版 |
+| `generate_refraction.jsx` | 已有 `job.json` 分配表 | 读 `job.json` 图层分配，按配置生成 |
 
 两种方式都生成纯黑矢量形状、裁到各层可见区域、建立 `ZG_OUT__` 组，另存独立折光纹母版 PSD，不覆盖源 PSD。
 
@@ -16,9 +16,9 @@
 3. 弹窗内：点选图层 → 勾选「生成折光纹」、选纹样、填参数 →「应用到当前层」或「应用到全部启用层」。
 4. 点「生成」，选输出目录，得到 `ZG_master_<时间戳>.psd` 与 `master_report_<时间戳>.txt`。
 
-GUI 中最小线宽固定 `0.10 mm`；隐藏层默认不生成（可手动勾选启用）。下拉提供全部已实现纹样（见下表）；`高级参数` 框可用逗号分隔 `key=value` 传入如 `branch_angle_deg=30, sector_count=10, petal_count=8, fan_arc_deg=90`。
+GUI 中最小线宽固定 `0.10 mm`；隐藏层默认不生成（可手动勾选启用）。下拉提供全部已实现纹样（见下表），**菜单里显示中文名**（如 `折面平行纹`、`回纹`、`六角蜂巢纹`），图层列表行里写成「中文名(键名)」便于和 `job.json`、文档对照；内部仍按键名传参，中文名与键的对应取自 `design-logic.md` 的定稿命名。`高级参数` 框可用逗号分隔 `key=value` 传入如 `branch_angle_deg=30, sector_count=10, petal_count=8, fan_arc_deg=90`。
 
-### 智能建议（无外部 AI）
+### 智能建议（本地规则）
 
 GUI 内置**确定性启发式建议**：选中图层即显示一行「建议: …(原因)」，可用「建议当前层 / 建议全部」一键采纳。规则为：
 
@@ -90,7 +90,7 @@ GUI 内置**确定性启发式建议**：选中图层即显示一行「建议: �
 | `scale` | 鳞片纹 | 实现（弧形搭接） | `dash_field` | 错相短线场 | 实现 |
 | `dot_field` | 点阵/环点场 | 实现（环点） | `short_curve` | 稀疏短曲线 | 实现 |
 
-**未实现（设计意图，宏会明确报错）**：`interlace`、`braid`、`cube_iso`、`guilloche`、`organic_field`，以及 F 组复合光学纹 `moire_pair`、`angle_switch`、`density_switch`、`latent_image`、`image_switch`。这些涉及交叉断口、随形变形场、遮罩第二图或对位/材料敏感，需走 SKILL 全流程手工制作。
+**未实现（设计意图，宏会明确报错）**：`interlace`、`braid`、`cube_iso`、`guilloche`、`organic_field`，以及 F 组复合光学纹 `moire_pair`、`angle_switch`、`density_switch`、`latent_image`、`image_switch`。这些涉及交叉断口、随形变形场、遮罩第二图或对位/材料敏感，需按 [工作流](../工作流.md) 手工制作。
 
 ## 避免重复生成（默认开启）
 

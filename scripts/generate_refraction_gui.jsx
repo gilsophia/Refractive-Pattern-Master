@@ -1,5 +1,5 @@
 #target photoshop
-/* 折光纹母版生成宏 (手动分配模式, 不依赖 AI/job.json)
+/* 折光纹工具箱 / Refraction pattern master — 母版生成宏 (手动分配模式, 不需要 job.json)
  * 运行: 文件 -> 脚本 -> 浏览 -> generate_refraction_gui.jsx
  * 列出源 PSD 全部图层, 弹窗逐层勾选启用、选纹样、填参数, 点生成即可产出独立母版 PSD。
  * 使用模态 dialog (可靠常驻) + 紧凑多列布局, 避免窗口过长。 */
@@ -7,6 +7,22 @@
     var scriptDir = new File($.fileName).parent.fsName;
 
     var PATTERNS = ['parallel', 'facet', 'flow', 'wave', 'zigzag', 'chevron', 'feather', 'herringbone', 'bilateral_flow', 'meander', 'contour', 'topographic', 'radial', 'fan', 'cone', 'sunburst', 'concentric', 'ripple', 'spiral', 'vortex', 'petal_rosette', 'diamond_lattice', 'triangle_lattice', 'hex_lattice', 'checker', 'carbon_fiber', 'scale', 'dash_field', 'dot_field', 'short_curve'];
+    /* 纹样键 -> 中文名(取自 references/design-logic.md 的定稿命名)。下拉菜单显示中文, 内部仍用键名传参。 */
+    var PATTERN_LABELS = {
+        parallel: '单向平行纹', facet: '折面平行纹', flow: '顺势流线', wave: '平行波纹', zigzag: '连续折线纹',
+        chevron: '鱼骨纹', feather: '羽片纹', herringbone: '人字错列纹', bilateral_flow: '双向流线',
+        meander: '回纹', contour: '等距轮廓纹', topographic: '地形等高纹', radial: '放射纹', fan: '扇形纹',
+        cone: '锥形束纹', sunburst: '分区爆发纹', concentric: '同心纹', ripple: '涟漪纹', spiral: '螺旋纹',
+        vortex: '涡旋流场', petal_rosette: '花瓣玫瑰纹', diamond_lattice: '菱形网格', triangle_lattice: '三角网格',
+        hex_lattice: '六角蜂巢纹', checker: '棋盘方向纹', carbon_fiber: '碳纤维纹', scale: '鳞片纹',
+        dash_field: '错相短线场', dot_field: '点阵纹', short_curve: '稀疏短曲线'
+    };
+    function patternLabel(key) { return PATTERN_LABELS[key] || String(key); }
+    function patternLabelList() {
+        var out = [];
+        for (var i = 0; i < PATTERNS.length; i++) out.push(patternLabel(PATTERNS[i]));
+        return out;
+    }
     var DEFAULT_PATTERN = 'facet';
     var MIN_LINE_MM = 0.10;
 
@@ -39,7 +55,7 @@
             asg.push(a);
         }
 
-        var dlg = new Window('dialog', '折光纹生成（手动分配）');
+        var dlg = new Window('dialog', '折光纹工具箱 · 生成折光纹（手动分配）');
         dlg.orientation = 'column';
         dlg.alignChildren = 'left';
         dlg.preferredSize.width = 680;
@@ -52,7 +68,7 @@
         lb.preferredSize.width = 660; lb.preferredSize.height = 150;
 
         function rowText(idx) {
-            return (asg[idx].enabled ? '[启用]' : '[跳过]') + '  ' + asg[idx].pattern + '  ' + infos[idx].path + (infos[idx].visible ? '' : '  (隐藏)');
+            return (asg[idx].enabled ? '[启用]' : '[跳过]') + '  ' + patternLabel(asg[idx].pattern) + '(' + asg[idx].pattern + ')  ' + infos[idx].path + (infos[idx].visible ? '' : '  (隐藏)');
         }
         function refreshList() {
             refreshingList = true;
@@ -84,7 +100,7 @@
         noOverlapCb.value = true;
         noOverlapCb.helpTip = '按列表顺序生成时，每层只生成"尚未被先做的层占用"的部分，避免同一区域叠多套纹样变成实黑。列表为子层优先：细节纹样先占位，组容器与背景层只补空隙。';
         r0.add('statictext', undefined, '   纹样:');
-        var dd = r0.add('dropdownlist', undefined, PATTERNS);
+        var dd = r0.add('dropdownlist', undefined, patternLabelList());
         dd.selection = dd.items[0];
 
         var r1 = p.add('group'); r1.orientation = 'row'; r1.alignChildren = 'left';
@@ -111,6 +127,9 @@
         // ---- 编辑逻辑 ----
         function selectedIndex() { return lb.selection ? lb.selection.index : -1; }
         function patIndex(name) { for (var m = 0; m < PATTERNS.length; m++) if (PATTERNS[m] === name) return m; return 0; }
+        function selectedPatternKey() {   // 下拉菜单显示中文, 取键名按索引回查
+            return (dd.selection && dd.selection.index >= 0 && dd.selection.index < PATTERNS.length) ? PATTERNS[dd.selection.index] : DEFAULT_PATTERN;
+        }
         function loadIntoFields(idx) {
             var a = asg[idx];
             enabledCb.value = a.enabled;
@@ -123,7 +142,7 @@
         function fieldsToAssign(idx) {
             var a = asg[idx];
             a.enabled = enabledCb.value;
-            a.pattern = dd.selection ? dd.selection.text : DEFAULT_PATTERN;
+            a.pattern = selectedPatternKey();
             a.line_mm = eLine.text; a.direction_deg = eDir.text; a.amplitude_mm = eAmp.text; a.wavelength_mm = eWave.text;
             a.gap_dense_mm = eDense.text; a.gap_mid_mm = eMid.text; a.gap_sparse_mm = eSparse.text;
             a.segment_length_mm = eSeg.text; a.path_tolerance_px = eTol.text; a.center_x = eCx.text; a.center_y = eCy.text; a.inner_radius_mm = eInner.text; a.extra = eExtra.text;
@@ -142,7 +161,7 @@
         function updateHint(k) {
             if (k < 0) { hint.text = ''; return; }
             var s = ZG.suggest(infos[k], src.width.as('px'), src.height.as('px'));
-            hint.text = '建议: ' + (s.skip ? '[跳过] ' : '') + s.pattern + (s.reason ? '  (' + s.reason + ')' : '');
+            hint.text = '建议: ' + (s.skip ? '[跳过] ' : '') + patternLabel(s.pattern) + '(' + s.pattern + ')' + (s.reason ? '  (' + s.reason + ')' : '');
         }
         function applySuggest(k) {
             var s = ZG.suggest(infos[k], src.width.as('px'), src.height.as('px'));
