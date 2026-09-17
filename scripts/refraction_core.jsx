@@ -2,7 +2,7 @@
  * 由 generate_refraction.jsx (job.json 模式) 与 generate_refraction_gui.jsx (手动分配模式) 通过 $.evalFile 共用。
  * 不包含 UI 与 JSON 解析, 只暴露 ZG.generate / ZG.collectLayers 等。 */
 var ZG = {};
-var ZG_CORE_VERSION = '2026-09-16h';   // 便于在 zg_progress.txt 里确认实际运行的版本
+var ZG_CORE_VERSION = '2026-09-17a';   // 便于在 zg_progress.txt 里确认实际运行的版本
 
 (function () {
     var c = charIDToTypeID, s = stringIDToTypeID;
@@ -1656,9 +1656,11 @@ var ZG_CORE_VERSION = '2026-09-16h';   // 便于在 zg_progress.txt 里确认实
                     throw new Error(srcPath + ': 区域边界异常，疑似坐标单位错误: ' + bb[0] + ',' + bb[1] + '..' + bb[2] + ',' + bb[3]);
                 var b = { x0: bb[0], y0: bb[1], x1: bb[2], y1: bb[3] };
 
-                /* ---- 扣除已生成区域(子层优先): 只保留本层尚未被占用的部分 ---- */
+                /* ---- 扣除已生成区域(子层优先): 只保留本层尚未被占用的部分 ----
+                 * "不折光"层同样按原优先度参与扣除与区域占用(它占下的区域后面的层不会再去铺纹样),
+                 * 只是它的输出组生成后会被隐藏 —— 标记只影响可见性, 不影响生成逻辑。 */
                 var maskSubs = subs;
-                if (noOverlap && !hideOut && usedBox && boxHit(b, usedBox) && ensureUsedChannel()) {
+                if (noOverlap && usedBox && boxHit(b, usedBox) && ensureUsedChannel()) {
                     stage = '扣除已生成区域: ' + srcPath;
                     var tBool = new Date().getTime(), regPathB = null;
                     try {
@@ -1812,8 +1814,8 @@ var ZG_CORE_VERSION = '2026-09-16h';   // 便于在 zg_progress.txt 里确认实
                         regPath = master.pathItems.add('ZG_temp_region_' + String(new Date().getTime()), subsPxToPt(master, limitSubs(maskSubs)));
                         plog('已加区域路径, 挂组蒙版...');
                         applyVectorMask(master, shapeHost, regPath);
-                        if (noOverlap && !hideOut && ensureUsedChannel()) {
-                            // 把本层实际占用的区域并入"已生成区域"
+                        if (noOverlap && ensureUsedChannel()) {
+                            // 把本层实际占用的区域并入"已生成区域"("不折光"层同样占用, 见上方说明)
                             regPath.makeSelection();
                             try { master.selection.store(usedCh, SelectionType.EXTEND); }
                             catch (eSt) {   // 少数版本不支持带类型的 store, 退回 载入+存储
@@ -1911,12 +1913,19 @@ var ZG_CORE_VERSION = '2026-09-16h';   // 便于在 zg_progress.txt 里确认实
              * 悄悄还原成 true —— 生成时日志写着 OK(hidden), 存出来的母版里这些组却是亮的。
              * 这里在最后统一重设一遍并回读确认, 让"不折光"真正落到交付的 PSD 里。 */
             if (hiddenGroups.length) {
-                var hidFail = 0;
+                var hidFail = 0, hidGone = 0;
                 for (var hgi = 0; hgi < hiddenGroups.length; hgi++) {
-                    try { hiddenGroups[hgi].visible = false; } catch (eHg) { hidFail++; continue; }
-                    try { if (hiddenGroups[hgi].visible) hidFail++; } catch (eHg2) { hidFail++; }
+                    var hg = hiddenGroups[hgi], hgAlive = true;
+                    try { hg.visible = false; } catch (eHg) { hgAlive = false; }
+                    if (!hgAlive) {
+                        /* 组可能已被"空容器清理"删掉: 还能读到 id 才算真失败 */
+                        try { var hgId = hg.id; hidFail++; } catch (eGone) { hidGone++; }
+                        continue;
+                    }
+                    try { if (hg.visible) hidFail++; } catch (eHg2) { hidFail++; }
                 }
-                plog('不折光输出组隐藏确认: ' + (hiddenGroups.length - hidFail) + '/' + hiddenGroups.length + (hidFail ? (' (仍可见 ' + hidFail + ' 组)') : ''));
+                var hidOk = hiddenGroups.length - hidFail - hidGone;
+                plog('不折光输出组隐藏确认: ' + hidOk + '/' + (hiddenGroups.length - hidGone) + (hidFail ? (' (仍可见 ' + hidFail + ' 组)') : '') + (hidGone ? (' (组已删除 ' + hidGone + ')') : ''));
             }
             master.saveAs(psdFile, opts, false, Extension.LOWERCASE);
             saved = true;
