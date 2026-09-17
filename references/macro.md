@@ -1,4 +1,4 @@
-# 折光纹母版生成宏
+﻿# 折光纹母版生成宏
 
 把 [工作流](../工作流.md) 里**确定性的几何生成 + 图层构造 + 母版输出**一段封装成 Photoshop 内可直接运行的宏。几何与图层构造由 `scripts/refraction_core.jsx` 提供，两个入口共用：
 
@@ -22,9 +22,9 @@ GUI 中最小线宽固定 `0.10 mm`；隐藏层默认不生成（可手动勾选
 
 GUI 内置**确定性启发式建议**：选中图层即显示一行「建议: …(原因)」，可用「建议当前层 / 建议全部」一键采纳。规则为：
 
-1. 图层名关键词匹配（中英文，见 `refraction_core.jsx` 的 `suggest` 表）：如「头发/hair→flow、脸/face→跳过、背景/bg→parallel、云/cloud→contour、水/water→wave、光环/halo→radial、羽/wing→feather、花/petal→petal_rosette、边框/frame→meander、鳞/scale→scale、科技→hex_lattice、文字/text→跳过」等。
-2. 图层名含「不加折光 / [SKIP] / NO_REFRACTION」等 → 建议跳过。
-3. 几何兜底：细长（长宽比>3）→ flow（方向沿长轴）；占画布<3% 的小区域 → short_curve；否则 → parallel。
+1. 图层名关键词匹配（中英文，见 `refraction_core.jsx` 的 `suggest` 表）：如「头发/hair→flow、脸/face→跳过、**边框/框/frame/边饰→diamond_tri（三角菱格纹）**、**背景/bg/天空/大面积→moire_radial（辐射摩尔纹）**、云/cloud→contour、水/water→wave、光环/halo→radial、羽/wing→feather、花/petal→petal_rosette、回纹/迷宫→meander、鳞/scale→scale、科技→hex_lattice、文字/text→跳过」等。
+2. 图层名含「不加折光 / 不折光 / 不做 / 跳过 / skip」等 → 照常生成但输出组隐藏（见下节）。
+3. 几何兜底：细长（长宽比>3）→ flow（方向沿长轴）；占画布<3% 的小区域 → short_curve；占画布>60% 的大面积 → moire_radial；否则 → parallel。
 
 建议只改纹样、方向与是否启用，不改线宽/净隙（仍用默认值或你已填的值）；它是**辅助提示而非自动决策**，采纳后仍可手动修改。
 
@@ -57,10 +57,10 @@ GUI 内置**确定性启发式建议**：选中图层即显示一行「建议: �
 | `line_mm` | 线宽（≥ `min_line_mm`） |
 | `gap_dense_mm` / `gap_mid_mm` / `gap_sparse_mm` | 三档净隙，须 dense≤mid≤sparse |
 | `direction_deg` | 画布向右 0°、向下 90°（方向类纹样的主轴） |
-| `amplitude_mm` | 振幅（wave/zigzag）、鱼骨分支长基准（feather）、鳞片/点阵半径（scale/dot_field/petal 瓣宽） |
-| `wavelength_mm` | 波长（wave/zigzag）；网格/单元格大小（herringbone/meander/lattice/checker/carbon/scale/hex/dot_field 等） |
+| `amplitude_mm` | 振幅（wave/zigzag）、鱼骨分支长基准（feather）、鳞片/点阵半径（scale/dot_field/petal 瓣宽）、辐射摩尔纹的圆心错位量（moire_radial，决定摩尔条纹疏密，默认 0.9mm） |
+| `wavelength_mm` | 波长（wave/zigzag）；网格/单元格大小（herringbone/meander/lattice/checker/carbon/scale/hex/dot_field/**diamond_tri** 等） |
 | `gradient_axis` / `dense_end` | 密度渐变轴（`vertical`/`horizontal`/`none`）与密端（`top`/`bottom`/`left`/`right`） |
-| `center_x` / `center_y` / `inner_radius_mm` | 中心类纹样中心（0–1 为画布比例，>1 视为 mm）与中心留空/起始半径 |
+| `center_x` / `center_y` / `inner_radius_mm` | 中心类纹样中心（0–1 为画布比例，>1 视为 mm）与中心留空/起始半径。**未填内径时按「线宽+中隙」自动取 8 倍基准间距**（radial/fan/cone/sunburst；moire_radial 取区域半径的 1/4，并在内圈用同间距同心圆环收口），避免旧版默认 0 时只生成两三条射线；moire_radial 显式填了内径则按指定值留空、不加环 |
 | `segment_length_mm` | 短线长（short_curve/dash_field/carbon_fiber） |
 | `branch_angle_deg` | 鱼骨/羽片分支与主轴夹角（默认 45） |
 | `sector_count` | sunburst 扇区数（默认 8） |
@@ -83,12 +83,13 @@ GUI 内置**确定性启发式建议**：选中图层即显示一行「建议: �
 | `feather` | 羽片纹 | 实现（脊线+弯支） | `vortex` | 涡旋流场 | 实现（双臂螺旋近似） |
 | `herringbone` | 人字错列纹 | 实现 | `petal_rosette` | 花瓣玫瑰纹 | 实现（椭圆花瓣） |
 | `bilateral_flow` | 双向流线 | 实现（中缝留白） | `diamond_lattice` | 菱形网格 | 实现（两组斜线） |
-| `meander` | 回纹/迷宫纹 | 实现（简化） | `triangle_lattice` | 三角网格 | 实现（三组线） |
-| `contour` | 等距轮廓纹 | 实现 | `hex_lattice` | 六角蜂巢纹 | 实现 |
-| `topographic` | 地形等高纹 | 实现（=contour） | `checker` | 棋盘方向纹 | 实现 |
-| `radial` | 放射纹 | 实现 | `carbon_fiber` | 碳纤维纹 | 实现 |
-| `scale` | 鳞片纹 | 实现（弧形搭接） | `dash_field` | 错相短线场 | 实现 |
-| `dot_field` | 点阵/环点场 | 实现（环点） | `short_curve` | 稀疏短曲线 | 实现 |
+| `meander` | 回纹/迷宫纹 | 实现（简化） | `diamond_tri` | 三角菱格纹 | 实现（正倒三角咬合成菱形，格内有细线） |
+| `contour` | 等距轮廓纹 | 实现 | `moire_radial` | 辐射摩尔纹 | 实现（三组微错位放射线干涉） |
+| `topographic` | 地形等高纹 | 实现（=contour） | `triangle_lattice` | 三角网格 | 实现（三组线） |
+| `radial` | 放射纹 | 实现 | `hex_lattice` | 六角蜂巢纹 | 实现 |
+| `scale` | 鳞片纹 | 实现（弧形搭接） | `checker` | 棋盘方向纹 | 实现 |
+| `dot_field` | 点阵/环点场 | 实现（环点） | `carbon_fiber` | 碳纤维纹 | 实现 |
+| `short_curve` | 稀疏短曲线 | 实现 | `dash_field` | 错相短线场 | 实现 |
 
 **未实现（设计意图，宏会明确报错）**：`interlace`、`braid`、`cube_iso`、`guilloche`、`organic_field`，以及 F 组复合光学纹 `moire_pair`、`angle_switch`、`density_switch`、`latent_image`、`image_switch`。这些涉及交叉断口、随形变形场、遮罩第二图或对位/材料敏感，需按 [工作流](../工作流.md) 手工制作。
 

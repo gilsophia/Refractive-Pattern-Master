@@ -2,7 +2,7 @@
  * 由 generate_refraction.jsx (job.json 模式) 与 generate_refraction_gui.jsx (手动分配模式) 通过 $.evalFile 共用。
  * 不包含 UI 与 JSON 解析, 只暴露 ZG.generate / ZG.collectLayers 等。 */
 var ZG = {};
-var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实际运行的版本
+var ZG_CORE_VERSION = '2026-09-16h';   // 便于在 zg_progress.txt 里确认实际运行的版本
 
 (function () {
     var c = charIDToTypeID, s = stringIDToTypeID;
@@ -140,14 +140,71 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
         si.closed = sub.closed; si.operation = sub.operation; si.entireSubPath = pts;
         return si;
     }
+    /* 子路径的近似面积(px², 有符号: 正负代表环绕方向, 即外框/洞)与周长。
+     * 只按锚点算, 忽略贝塞尔控制点 —— 用于筛碎片足够, 不做几何交付。 */
+    function subSignedArea(sub) {
+        var pts = sub.entireSubPath, n = pts.length, s = 0;
+        if (n < 3) return 0;
+        for (var i = 0; i < n; i++) {
+            var a = pts[i].anchor, b = pts[(i + 1) % n].anchor;
+            s += a[0] * b[1] - b[0] * a[1];
+        }
+        return s / 2;
+    }
+    function subPerimeter(sub) {
+        var pts = sub.entireSubPath, n = pts.length, p = 0;
+        for (var i = 0; i < n; i++) {
+            var a = pts[i].anchor, b = pts[(i + 1) % n].anchor;
+            p += Math.sqrt((b[0] - a[0]) * (b[0] - a[0]) + (b[1] - a[1]) * (b[1] - a[1]));
+        }
+        return p;
+    }
+    /* 把子路径压进 Photoshop 单条路径上限(1000 条子路径)。
+     * 按 |面积| 从大到小保留: 外框的面积必然大于它内部的洞, 所以按面积取前 N 条
+     * 不会出现「洞留下、外框被丢」把蒙版填反的错。
+     * 旧写法按节点数排序, 在大区域上是灾难: 4 点的大块被丢、5 点的碎屑留下。
+     * 实测 007 母版里 卡面 / background / bg-woods / inner / human / queen 等 11 个组的
+     * 蒙版子路径数都恰好 900(截断上限), 蒙版碎成噪点。 */
     function limitSubs(subs) {
         var out = [], i;
         for (i = 0; i < subs.length; i++) out.push(limitSub(subs[i]));
-        if (out.length > MAX_SUBPATHS) {   // 极少数碎区域: 保留最大的若干条并记录
-            out.sort(function (a, b) { return b.entireSubPath.length - a.entireSubPath.length; });
-            out = out.slice(0, MAX_SUBPATHS);
+        if (out.length <= MAX_SUBPATHS) return out;
+        var arr = [];
+        for (i = 0; i < out.length; i++) arr.push({ s: out[i], a: Math.abs(subSignedArea(out[i])) });
+        arr.sort(function (x, y) { return y.a - x.a; });
+        var kept = [];
+        for (i = 0; i < MAX_SUBPATHS; i++) kept.push(arr[i].s);
+        return kept;
+    }
+    /* 蒙版裁切边界简化(只在子路径数超过 Photoshop 单条路径上限时才动手, 不超上限就原样保留):
+     * 先丢掉放不下「线宽+密隙」一个重复单元的碎屑(面积 < 单元², 或平均宽度 2A/P < 单元) ——
+     * 这类碎片是布尔相减与路径容差留下的毛边, 留着只会让蒙版变成噪点、让 Photoshop 卡在建路径上;
+     * 若还超上限, 再按 |面积| 保留最大的 MAX_SUBPATHS 条。
+     * 面积与平均宽度都按「包含关系」单调(外框 > 洞), 不会错配岛/洞。 */
+    function simplifyMaskSubs(subs, cfg) {
+        var out = [], i;
+        if (subs.length <= MAX_SUBPATHS) {
+            for (i = 0; i < subs.length; i++) out.push(limitSub(subs[i]));
+            return { subs: out, dropped: 0, areaKept: 0, areaAll: 0 };
         }
-        return out;
+        var unit = cfg.linePx + cfg.gapDensePx;
+        var minArea = unit * unit, minWidth = unit;
+        var kept = [], dropped = 0, areaKept = 0, areaAll = 0;
+        for (i = 0; i < subs.length; i++) {
+            var a = Math.abs(subSignedArea(subs[i])), per = subPerimeter(subs[i]);
+            areaAll += a;
+            if (a < minArea || (per > 1e-6 && 2 * a / per < minWidth)) { dropped++; continue; }
+            kept.push({ s: subs[i], a: a });
+            areaKept += a;
+        }
+        if (kept.length > MAX_SUBPATHS) {
+            kept.sort(function (x, y) { return y.a - x.a; });
+            for (i = MAX_SUBPATHS; i < kept.length; i++) { dropped++; areaKept -= kept[i].a; }
+            kept = kept.slice(0, MAX_SUBPATHS);
+        }
+        out = [];
+        for (i = 0; i < kept.length; i++) out.push(limitSub(kept[i].s));
+        return { subs: out, dropped: dropped, areaKept: areaKept, areaAll: areaAll };
     }
 
     /* ---------------- DOM 辅助 ---------------- */
@@ -346,10 +403,13 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
             return desc.hasKey(s('hasVectorMask')) && desc.getBoolean(s('hasVectorMask'));
         } catch (e) { return false; }
     }
-    // Bound host calls by both subpaths and anchor count. Geometry is unchanged.
+    /* 形状分批: 每批 ≤900 条子路径且 ≤10000 节点。
+     * 单条路径的点数越多, Photoshop 建立形状层的耗时会超线性增长
+     * (实测 9600 点 ≈0.32ms/点, 30392 点 ≈0.7ms/点), 所以宁多分几批也不要堆成一条大路径,
+     * 避免某一批把 Photoshop 卡住几十秒到几分钟。 */
     function planShapeBatches(polys) {
         var batches = [], start = 0, points = 0, total = 0;
-        var maxPaths = MAX_SUBPATHS, maxPoints = 60000;
+        var maxPaths = MAX_SUBPATHS, maxPoints = 10000;
         for (var i = 0; i < polys.length; i++) {
             var n = polys[i].length;
             if (n > MAX_SUB_POINTS) throw new Error('单条路径节点数 ' + n + ' 超过 Photoshop 单子路径上限 ' + MAX_SUB_POINTS + '；未截断纹样');
@@ -358,8 +418,8 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
                 start = i; points = 0;
             }
             points += n; total += n;
-            if (total > 1500000 || i >= 100000)
-                throw new Error('单区域纹样超过安全预算（100000 条 / 1500000 节点），请拆成多个区域分次生成；未截断纹样');
+            if (total > 250000 || i >= 60000)
+                throw new Error('单区域纹样超过安全预算（60000 条 / 250000 节点），请放大「容差px」、加大线宽净隙或拆成多个区域分次生成；未截断纹样');
         }
         if (start < polys.length) batches.push({ start: start, end: polys.length, points: points });
         return { batches: batches, points: total };
@@ -502,9 +562,20 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
     /* ---------------- "不折光"标记 (模糊识别) ----------------
      * 图层或编组命名里带这些字样即表示该层(及其全部子项)不做折光:
      * 照常生成, 但生成的输出组会被隐藏, 便于与源文件的层级/可见性对应。
-     * 允许简写与不同称呼, 中英文均可。 */
-    var NO_REFRACTION_RE = /不加折光|不需要折光|不需要加折光纹|不折光|不做折光|不要折光|不用折光|无需折光|无须折光|不需折光|免折光|不压纹|不加纹|无纹|不做|不用|不要|跳过|no[\s_-]?refraction|\[skip\]|\bskip\b/i;
-    function isNoRefraction(name) { return NO_REFRACTION_RE.test(String(name == null ? '' : name)); }
+     * 允许简写与不同称呼, 中英文均可。
+     * 注意: 这里不能用长中文交替正则! ExtendScript(PS 2020 实测)对长中文交替的
+     * 正则 (旧版 20 项 | 交替共 117 字符) 会漏匹配: 'hot stamp/Silver（不做折光）'
+     * 判 false, 而同一串用短正则 /不做折光/ 判 true。漏判的后果是「不做折光」组被
+     * 当成普通层: 输出组没隐藏, 还占用了区域占用通道, 后面 BG 这类背景层的蒙版
+     * 被整片挖掉(2026-09-16 008 次日志里 Silver/Queen 就是这么被算进去的)。
+     * 中文标记改用 indexOf 逐项查找, 英文标记保留短正则。 */
+    var NO_REFRACTION_MARKS = ['不加折光', '不需要折光', '不需要加折光纹', '不折光', '不做折光', '不要折光', '不用折光', '无需折光', '无须折光', '不需折光', '免折光', '不压纹', '不加纹', '无纹', '不做', '不用', '不要', '跳过'];
+    var NO_REFRACTION_ASCII_RE = /\bskip\b|no[\s_-]?refraction|\[skip\]/i;
+    function isNoRefraction(name) {
+        var v = String(name == null ? '' : name);
+        for (var i = 0; i < NO_REFRACTION_MARKS.length; i++) if (v.indexOf(NO_REFRACTION_MARKS[i]) >= 0) return true;
+        return NO_REFRACTION_ASCII_RE.test(v);
+    }
 
     /* ---------------- 启发式建议 (本地规则) ---------------- */
     function suggest(info, canvasW, canvasH) {
@@ -521,14 +592,15 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
             [/飘带|丝带|衣|布|裙|袖|袍|cloth|fabric|ribbon|带/i, { pattern: 'flow', why: '织物/飘带 → flow' }],
             [/羽|翅|翼|feather|wing/i, { pattern: 'feather', why: '羽翼 → feather' }],
             [/花|花瓣|flower|petal|玫瑰|rose/i, { pattern: 'petal_rosette', why: '花卉 → petal_rosette' }],
-            [/光环|太阳|日|放射|ray|sun|halo|星芒|光芒|光/i, { pattern: 'radial', why: '光环/太阳 → radial' }],
+            [/光环|光晕|光芒|光线|放射|太阳|日轮|ray|sun|halo|星芒|radial/i, { pattern: 'radial', why: '光环/太阳 → radial' }],
             [/圆|币|coin|表盘|镜|盘|环|ring/i, { pattern: 'concentric', why: '圆/盘 → concentric' }],
-            [/边框|框|border|边饰|花边|frame|饰/i, { pattern: 'meander', why: '边框 → meander' }],
+            [/边框|框|border|边饰|花边|frame|饰带|菱格|三角/i, { pattern: 'diamond_tri', why: '边框/边饰 → 三角菱格纹' }],
+            [/回纹|迷宫|meander|希腊/i, { pattern: 'meander', why: '回纹 → meander' }],
             [/鳞|鱼鳞|龙鳞|scale|甲/i, { pattern: 'scale', why: '鳞片 → scale' }],
             [/涡|旋|漩涡|spiral|vortex|星云/i, { pattern: 'spiral', why: '漩涡 → spiral' }],
             [/科技|机械|电路|机甲|装甲|蜂巢|honey|tech/i, { pattern: 'hex_lattice', why: '科技/机械 → hex_lattice' }],
             [/石|建筑|墙|砖|building|城堡|岩石/i, { pattern: 'facet', why: '建筑/硬质 → facet' }],
-            [/背景|天空|底|background|bg|夜空/i, { pattern: 'parallel', why: '背景 → parallel' }],
+            [/背景|天空|底|background|bg|夜空|大面积/i, { pattern: 'moire_radial', why: '背景/大面积 → 辐射摩尔纹' }],
             [/纺织|编织|格|棋盘|checker|weave|格子/i, { pattern: 'herringbone', why: '纺织/格 → herringbone' }]
         ];
         var matched = false;
@@ -548,6 +620,7 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
             if (!matched) {
                 if (aspect > 3) { r.pattern = 'flow'; r.reason = '细长(长宽比 ' + aspect.toFixed(1) + ') → flow'; }
                 else if (areaFrac < 0.03) { r.pattern = 'short_curve'; r.reason = '小区域 → short_curve'; }
+                else if (areaFrac > 0.6) { r.pattern = 'moire_radial'; r.reason = '大面积(占画布 ' + Math.round(areaFrac * 100) + '%) → 辐射摩尔纹'; }
                 else { r.pattern = 'parallel'; r.reason = '规则区域 → parallel'; }
             }
         }
@@ -928,7 +1001,7 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
         var cx = cfg.cxPx, cy = cfg.cyPx, corners = [[b.x0, b.y0], [b.x1, b.y0], [b.x0, b.y1], [b.x1, b.y1]], R = 0;
         for (var k = 0; k < 4; k++) { var ox = corners[k][0] - cx, oy = corners[k][1] - cy, dd = Math.sqrt(ox * ox + oy * oy); if (dd > R) R = dd; }
         R += cfg.linePx + cfg.gapSparsePx;
-        var r0 = cfg.innerRadiusPx; if (r0 < cfg.linePx) r0 = cfg.linePx;
+        var r0 = defaultInnerRadius(cfg, R);
         var dtheta = (cfg.linePx + cfg.gapDensePx) / r0;
         var n = Math.floor(2 * Math.PI / dtheta); if (n < 2) n = 2;
         var step = 2 * Math.PI / n, polys = [];
@@ -979,6 +1052,15 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
         for (var k = 0; k < 4; k++) { var dx = corners[k][0] - cx, dy = corners[k][1] - cy; var d = Math.sqrt(dx * dx + dy * dy); if (d > R) R = d; }
         return R;
     }
+    /* 中心类纹样的起始半径: 未指定内径时按「线宽+中隙」推导, 避免默认 0 导致内半径只有半条线宽、
+     * 角间距过大而只生成两三条射线(旧版 radial 在大面积上实测只有 3 条线)。 */
+    function defaultInnerRadius(cfg, R) {
+        if (cfg.innerRadiusPx > 0) return Math.max(cfg.innerRadiusPx, cfg.linePx);
+        var pitch = cfg.linePx + cfg.gapMidPx;
+        var r0 = Math.max(cfg.linePx * 4, pitch * 8);
+        if (R && r0 > R * 0.6) r0 = R * 0.6;
+        return Math.max(r0, cfg.linePx);
+    }
     function withDir(cfg, ang) { var o = {}; for (var k in cfg) o[k] = cfg[k]; o.dirRad = ang; return o; }
     // 圆弧分段数按弦高(0.25px)计算, 不再固定 400 段, 大半径时点数可减到 1/3
     function arcSegments(r) {
@@ -1010,7 +1092,7 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
     }
     function genFan(b, cfg) {
         var cx = cfg.cxPx, cy = cfg.cyPx, R = maxDistFrom(b, cx, cy) + cfg.linePx + cfg.gapSparsePx;
-        var r0 = cfg.innerRadiusPx; if (r0 < cfg.linePx) r0 = cfg.linePx;
+        var r0 = defaultInnerRadius(cfg, R);
         var arc = cfg.fanArcRad || (Math.PI * 2 / 3), base = cfg.dirRad - arc / 2;
         var dtheta = (cfg.linePx + cfg.gapDensePx) / r0, n = Math.max(1, Math.floor(arc / dtheta)), polys = [];
         for (var i = 0; i < n; i++) polys.push(wedge(cx, cy, r0, R, base + arc * i / n, cfg.linePx));
@@ -1031,7 +1113,7 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
         }
         var span = 2 * Math.PI - maxGap, aMin = gapStart + maxGap;
         var inside = (cx >= b.x0 && cx <= b.x1 && cy >= b.y0 && cy <= b.y1);
-        var rNear = inside ? (cfg.innerRadiusPx || cfg.linePx) : rmin;
+        var rNear = inside ? defaultInnerRadius(cfg, rmax) : rmin;
         if (rNear < cfg.linePx) rNear = cfg.linePx;
         var R = rmax + cfg.linePx + cfg.gapSparsePx;
         var dtheta = (cfg.linePx + cfg.gapDensePx) / rNear, n = Math.max(1, Math.floor(span / dtheta)), polys = [];
@@ -1040,7 +1122,7 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
     }
     function genSunburst(b, cfg) {
         var cx = cfg.cxPx, cy = cfg.cyPx, R = maxDistFrom(b, cx, cy) + cfg.linePx + cfg.gapSparsePx;
-        var r0 = cfg.innerRadiusPx; if (r0 < cfg.linePx) r0 = cfg.linePx;
+        var r0 = defaultInnerRadius(cfg, R);
         var n = cfg.sectorCount || 8, sec = 2 * Math.PI / n, polys = [];
         for (var k = 0; k < n; k++) {
             var gap = (k % 2 === 0) ? cfg.gapDensePx : cfg.gapSparsePx;
@@ -1117,6 +1199,94 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
             var off = (row % 2) * dx / 2;
             for (var x = b.x0 - dx + off; x < b.x1 + dx; x += dx) polys.push(hexRibbon(x, y, e, half));
             row++;
+        }
+        return polys;
+    }
+    /* 三角菱格纹: 正倒三角咬合成菱形, 菱形内再套内缩菱形(更细的线条), 菱形连续铺满区域。
+     * 用于卡牌边框/边饰带: 单元 = 基准间距的 3~6 倍; 轮廓按半净隙内缩, 内圈每 2 倍基准间距一圈,
+     * 水平对角线在每个内圈顶点处自动断开, 保证处处留出基准净距。 */
+    function genDiamondTri(b, cfg) {
+        var pitch = cfg.linePx + cfg.gapMidPx;
+        var d = unitCellPx(cfg, 3, 6);                                   // 菱形半对角线
+        var half = cfg.linePx / 2;
+        var innerW = Math.max(cfg.minLinePx || cfg.linePx, cfg.linePx * 0.7);   // 格内细线宽(不低于最小线宽)
+        var polys = [], rows = 0, y = b.y0 - d;
+        while (y < b.y1 + d) {
+            var off = (rows % 2) ? d : 0;
+            for (var x = b.x0 - d + off; x < b.x1 + d; x += d * 2) {
+                var e = d - pitch / 2;                                   // 轮廓按半净隙内缩, 相邻菱形之间留净距
+                if (e < d * 0.3) e = d * 0.3;
+                var c = [[x, y - e], [x + e, y], [x, y + e], [x - e, y]];
+                polys.push(offsetPolyline(c.concat([c[0]]), half));
+                var cuts = [];                                           // 内圈顶点处需要让开的区间
+                for (var k = 1; k <= 2; k++) {
+                    var ek = e - k * 2 * pitch;
+                    if (ek < e * 0.25) break;
+                    cuts.push([x - ek - pitch, x - ek + pitch]);
+                    cuts.push([x + ek - pitch, x + ek + pitch]);
+                    var ck = [[x, y - ek], [x + ek, y], [x, y + ek], [x - ek, y]];
+                    polys.push(offsetPolyline(ck.concat([ck[0]]), innerW / 2));
+                }
+                var segs = [[x - e, x + e]];                             // 正倒三角: 水平对角线(避开内圈)
+                for (var ci = 0; ci < cuts.length; ci++) {
+                    var keep = [], a0 = cuts[ci][0], a1 = cuts[ci][1];
+                    for (var si = 0; si < segs.length; si++) {
+                        var s0 = segs[si][0], s1 = segs[si][1];
+                        if (a1 <= s0 || a0 >= s1) { keep.push([s0, s1]); continue; }
+                        if (a0 > s0) keep.push([s0, a0]);
+                        if (a1 < s1) keep.push([a1, s1]);
+                    }
+                    segs = keep;
+                }
+                for (var sj = 0; sj < segs.length; sj++) {
+                    if (segs[sj][1] - segs[sj][0] < pitch) continue;      // 过短的段不要
+                    polys.push(offsetPolyline([[segs[sj][0], y], [segs[sj][1], y]], half));
+                }
+            }
+            y += d; rows++;
+        }
+        return polys;
+    }
+    /* 辐射摩尔纹: 2~3 组圆心微错位、相位微错开的放射线族叠加, 线间交叉形成放射状摩尔条纹,
+     * 压纹反光时呈现极光式流动感。适合大面积背景/夜空。
+     * 未指定内径时: 起始半径按区域大小取 1/4(保证外缘线距不过疏), 内圈用同间距同心圆环
+     * 收口 —— 否则中心会留一个半径达区域半径 1/4 的大圆空白(1200ppi 的 BG 层实测半径
+     * 583px ≈ 12mm, 直径接近卡宽一半)。显式指定 inner_radius_mm 时按指定值留空, 不加环。 */
+    function genMoireRadial(b, cfg) {
+        var pitch = cfg.linePx + cfg.gapMidPx;
+        var R0 = maxDistFrom(b, cfg.cxPx, cfg.cyPx) + cfg.linePx + cfg.gapSparsePx;
+        var autoInner = !(cfg.innerRadiusPx > 0);
+        var r0 = autoInner ? Math.max(R0 * 0.25, pitch * 6) : Math.max(cfg.innerRadiusPx, cfg.linePx);
+        if (r0 > R0 * 0.7) r0 = R0 * 0.7;
+        var dtheta = (cfg.linePx + cfg.gapDensePx) / r0;                 // 内半径处角间距 ≈ 密区中心距
+        var n = Math.floor(2 * Math.PI / dtheta);
+        if (n < 24) n = 24;
+        if (n > 720) n = 720;
+        var amp = (cfg.ampPx && cfg.ampPx > 0) ? Math.max(cfg.ampPx, cfg.linePx * 2) : Math.max(cfg.linePx * 3, pitch * 2);   // 圆心错位量 → 决定摩尔条纹疏密
+        var groups = [[0, 0], [1, 0], [0.34, 0.94]];
+        var polys = [];
+        if (autoInner) {
+            /* 环形收口: 内圈用与外圈放射线同间距的同心圆环填满, 在 r0 处与射线接上 */
+            var ringPitch = cfg.linePx + cfg.gapDensePx, guard = 0;
+            for (var rr = ringPitch; rr <= r0 && guard < 5000; rr += ringPitch) {
+                polys.push(circleRibbon(cfg.cxPx, cfg.cyPx, rr, cfg.linePx / 2));
+                guard++;
+            }
+        }
+        for (var g = 0; g < groups.length; g++) {
+            var cx = cfg.cxPx + groups[g][0] * amp, cy = cfg.cyPx + groups[g][1] * amp;
+            var Rg = maxDistFrom(b, cx, cy) + cfg.linePx + cfg.gapSparsePx;
+            var ph = g / (groups.length * n);                            // 每组相位微错开, 避免完全重合
+            for (var i = 0; i < n; i++) {
+                var th = (i + ph) * (2 * Math.PI / n);
+                var d0 = cfg.linePx / (2 * r0), d1 = cfg.linePx / (2 * Rg);
+                polys.push([
+                    [cx + r0 * Math.cos(th - d0), cy + r0 * Math.sin(th - d0)],
+                    [cx + Rg * Math.cos(th - d1), cy + Rg * Math.sin(th - d1)],
+                    [cx + Rg * Math.cos(th + d1), cy + Rg * Math.sin(th + d1)],
+                    [cx + r0 * Math.cos(th + d0), cy + r0 * Math.sin(th + d0)]
+                ]);
+            }
         }
         return polys;
     }
@@ -1361,6 +1531,8 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
             /* 输出组的父子关系: 生成完成后按源图层层级把 ZG_OUT 组嵌进各自的父组。
              * 只做父子级关联, 不建立剪辑蒙版(区域裁切仍由各组自己的矢量蒙版负责)。 */
             var groupByPath = {}, madePaths = [], containerPaths = {};
+            /* "不折光"输出组要在存盘前最后再压一次隐藏(见下方说明), 这里记住它们的引用。 */
+            var hiddenGroups = [];
             // 预判哪些源路径下面还有"会被生成"的子层: 这些层需要容器组 + 本层纹样子组
             var genPathSet = {};
             for (var gp = 0; gp < layers.length; gp++) {
@@ -1380,6 +1552,27 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
                     if (containerPaths[seg] && groupByPath[seg]) return groupByPath[seg];
                 }
                 return null;
+            }
+            /* 本层没有纹样可放(被先做的层完全覆盖 / 剩余区域只剩碎屑)但下面还有已生成的子层时,
+             * 仍建一个空容器组(纯容器允许无蒙版), 让子层按源层级嵌进去; 否则子层会散落在母版顶层。 */
+            function keepContainerForChildren(p, hideOutFlag, L2) {
+                if (!hasGeneratedChild(p)) return null;
+                try {
+                    idx++;
+                    var cG = master.layerSets.add();
+                    cG.blendMode = BlendMode.NORMAL;
+                    cG.name = 'ZG_OUT__' + pad3(idx) + '__' + sanitize(L2.output_name || leafName(p));
+                    cG.visible = !hideOutFlag;
+                    if (hideOutFlag) hiddenGroups.push(cG);
+                    groupByPath[p] = cG;
+                    madePaths.push(p);
+                    containerPaths[p] = true;
+                    plog('为子层保留空容器组: ' + cG.name);
+                    return cG;
+                } catch (eCg) {
+                    plog('警告: 空容器组建立失败: ' + (eCg && eCg.message ? eCg.message : String(eCg)));
+                    return null;
+                }
             }
             function boxHit(a, c) {
                 return !!a && !!c && a.x0 < c.x1 && a.x1 > c.x0 && a.y0 < c.y1 && a.y1 > c.y0;
@@ -1425,11 +1618,14 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
                 var gapMidMm = num(L.gap_mid_mm, num(dflt.gap_mid_mm, 0.15));
                 var gapSparseMm = num(L.gap_sparse_mm, num(dflt.gap_sparse_mm, 0.20));
                 if (lineMm < minLineMm) throw new Error(srcPath + ': line_mm ' + lineMm + ' 小于 min_line_mm ' + minLineMm);
+                if (!(lineMm > 0)) throw new Error(srcPath + ': 线宽必须大于 0（为 0 会导致纹样步距为 0 而陷入死循环）');
+                if (!(gapMidMm > 0)) throw new Error(srcPath + ': 中隙必须大于 0（为 0 会导致纹样步距为 0 而陷入死循环）');
                 if (!(gapDenseMm <= gapMidMm && gapMidMm <= gapSparseMm)) throw new Error(srcPath + ': 净隙需 dense<=mid<=sparse');
                 var tolPx = num(L.path_tolerance_px, num(dflt.path_tolerance_px, 1.0));
 
                 var cfg = {
-                    linePx: lineMm * scale, gapDensePx: gapDenseMm * scale, gapMidPx: gapMidMm * scale, gapSparsePx: gapSparseMm * scale,
+                    linePx: lineMm * scale, minLinePx: minLineMm * scale,
+                    gapDensePx: gapDenseMm * scale, gapMidPx: gapMidMm * scale, gapSparsePx: gapSparseMm * scale,
                     dirRad: num(L.direction_deg, num(dflt.direction_deg, 0)) * Math.PI / 180,
                     ampPx: num(L.amplitude_mm, num(dflt.amplitude_mm, 0.9)) * scale,
                     wavePx: num(L.wavelength_mm, num(dflt.wavelength_mm, 12)) * scale,
@@ -1466,6 +1662,7 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
                     stage = '扣除已生成区域: ' + srcPath;
                     var tBool = new Date().getTime(), regPathB = null;
                     try {
+                        if (subs.length > MAX_SUBPATHS) plog('区域路径按面积截断(相减用): ' + subs.length + ' -> ' + MAX_SUBPATHS + ' 条子路径');
                         regPathB = master.pathItems.add('ZG_temp_bool_' + String(new Date().getTime()), subsPxToPt(master, limitSubs(subs)));
                         regPathB.makeSelection();
                         master.selection.load(usedCh, SelectionType.DIMINISH);
@@ -1477,9 +1674,10 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
                             covered++;
                             plog('COVERED 已被先做的层完全覆盖, 跳过: ' + srcPath + ' ms=' + (new Date().getTime() - tBool));
                             log('COVERED 已被先做的层完全覆盖, 跳过: ' + srcPath);
+                            keepContainerForChildren(srcPath, hideOut, L);
                             continue;
                         }
-                        master.selection.makeWorkPath(Math.max(tolPx, tolPx * 1.5));   // 蒙版是裁切边界, 容差放宽一点可显著减少碎片与耗时
+                        master.selection.makeWorkPath(Math.max(tolPx, 2.0));   // 蒙版是裁切边界, 用较粗容差显著减少碎片与耗时
                         var clippedSubs = readWorkPathFast(master);
                         if (clippedSubs && clippedSubs.length) maskSubs = clippedSubs;
                         try { master.selection.deselect(); } catch (eD1) {}
@@ -1498,6 +1696,22 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
                         plog('警告: 扣除已生成区域失败, 本层按原区域生成: ' + (eBool && eBool.message ? eBool.message : String(eBool)));
                     }
                 }
+                /* ---- 蒙版边界简化: 丢掉比纹样还小的碎屑, 并把子路径数压进路径上限 ---- */
+                var sim = simplifyMaskSubs(maskSubs, cfg);
+                if (sim.dropped) plog('蒙版简化: 子路径 ' + maskSubs.length + ' -> ' + sim.subs.length + ' (丢碎屑 ' + sim.dropped + ', 保留面积 ' + (sim.areaAll > 0 ? Math.round(100 * sim.areaKept / sim.areaAll) : 100) + '%)');
+                if (!sim.subs.length) {
+                    /* 剩余区域全是放不下一条线的碎屑 —— 本层没有可放纹样的地方。
+                     * 若本层下面还有已生成的子层, 仍建一个空容器组(纯容器允许无蒙版)把子层按源层级收进去,
+                     * 否则它们会散落在母版顶层、丢掉源文件的层级。 */
+                    covered++;
+                    plog('COVERED 剩余区域仅碎屑(小于纹样尺度), 跳过本层纹样: ' + srcPath);
+                    log('COVERED 剩余区域仅碎屑, 跳过: ' + srcPath);
+                    keepContainerForChildren(srcPath, hideOut, L);
+                    continue;
+                }
+                maskSubs = sim.subs;
+                var mbSim = subsBBox(maskSubs);
+                if (mbSim && mbSim[2] > mbSim[0] && mbSim[3] > mbSim[1]) b = { x0: mbSim[0], y0: mbSim[1], x1: mbSim[2], y1: mbSim[3] };
                 plog('bbox ' + b.x0 + ',' + b.y0 + '..' + b.x1 + ',' + b.y1 + ' linePx=' + cfg.linePx + ' gapMid=' + cfg.gapMidPx + ' gapSparse=' + cfg.gapSparsePx + ' dirRad=' + cfg.dirRad);
 
                 var polys;
@@ -1522,6 +1736,8 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
                 else if (pattern === 'vortex') polys = genVortex(b, cfg);
                 else if (pattern === 'petal_rosette') polys = genPetal(b, cfg);
                 else if (pattern === 'diamond_lattice') polys = genDiamond(b, cfg);
+                else if (pattern === 'diamond_tri') polys = genDiamondTri(b, cfg);
+                else if (pattern === 'moire_radial') polys = genMoireRadial(b, cfg);
                 else if (pattern === 'triangle_lattice') polys = genTriLattice(b, cfg);
                 else if (pattern === 'hex_lattice') polys = genHex(b, cfg);
                 else if (pattern === 'checker') polys = genChecker(b, cfg);
@@ -1624,9 +1840,9 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
                 }
 
                 group.visible = !hideOut;
-                if (hideOut) hiddenCount++;
+                if (hideOut) { hiddenCount++; hiddenGroups.push(group); }
                 made++;
-                log((hideOut ? 'OK(hidden) ' : 'OK ') + srcPath + ' -> ' + groupName + ' | ' + pattern + ' 线数=' + polys.length + ' 形状层=' + cnt + ' 矢量=是 区域蒙版=' + (!config.fast ? '是' : '否(诊断模式)') + ' 子路径=' + subs.length);
+                log((hideOut ? 'OK(hidden) ' : 'OK ') + srcPath + ' -> ' + groupName + ' | ' + pattern + ' 线数=' + polys.length + ' 形状层=' + cnt + ' 矢量=是 区域蒙版=' + (!config.fast ? '是' : '否(诊断模式)') + ' 子路径=' + subs.length + ' 蒙版=' + maskSubs.length);
                 } catch (layerErr) {
                     var lmsg = (layerErr && layerErr.message) ? layerErr.message : String(layerErr);
                     plog('失败(已跳过该层): ' + srcPath + ' | ' + lmsg);
@@ -1652,6 +1868,13 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
                     else { nestFail++; plog('警告: 组嵌套失败 ' + npPath); }
                 }
             }
+            // 嵌套后仍为空的容器组: 子层嵌套失败时会留下空组, 结构校验会判「空输出组」, 这里先清掉
+            var emptyC = 0;
+            for (var eci = 0; eci < madePaths.length; eci++) {
+                var eg = groupByPath[madePaths[eci]];
+                if (eg && !eg.artLayers.length && !eg.layerSets.length) { try { eg.remove(); emptyC++; } catch (eEc) {} }
+            }
+            if (emptyC) plog('已清理空容器组: ' + emptyC + ' 个');
             // 清理母版顶层可能残留的散层(嵌套用的临时图层等)
             var strays = 0;
             try {
@@ -1682,6 +1905,19 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
                 plog('已删除区域占用通道 ZG_used_region');
             }
             plog('保存母版...');
+            /* 存盘前最后再压一次"不折光"输出组的隐藏状态。
+             * PS 2020 实测: 给组(尤其带矢量蒙版的组)设 visible=false 之后, 只要再删过/移过别的图层
+             * (母版空白层清理 blank.remove()、嵌套用的临时图层增删、清理散层), 组的 visible 会被
+             * 悄悄还原成 true —— 生成时日志写着 OK(hidden), 存出来的母版里这些组却是亮的。
+             * 这里在最后统一重设一遍并回读确认, 让"不折光"真正落到交付的 PSD 里。 */
+            if (hiddenGroups.length) {
+                var hidFail = 0;
+                for (var hgi = 0; hgi < hiddenGroups.length; hgi++) {
+                    try { hiddenGroups[hgi].visible = false; } catch (eHg) { hidFail++; continue; }
+                    try { if (hiddenGroups[hgi].visible) hidFail++; } catch (eHg2) { hidFail++; }
+                }
+                plog('不折光输出组隐藏确认: ' + (hiddenGroups.length - hidFail) + '/' + hiddenGroups.length + (hidFail ? (' (仍可见 ' + hidFail + ' 组)') : ''));
+            }
             master.saveAs(psdFile, opts, false, Extension.LOWERCASE);
             saved = true;
             plog('完成: ' + psdFile.fsName);
@@ -1718,4 +1954,18 @@ var ZG_CORE_VERSION = '2026-09-16f';   // 便于在 zg_progress.txt 里确认实
     ZG.sanitize = sanitize;
     ZG.num = num;
     ZG.pathReadInfo = function () { return pathReadInfo; };
+    /* 仅供 scripts/ 下的自检脚本调用, 不参与生成流程。
+     * 用途: 在 Photoshop 里直接跑纯函数自检(不建文档、不生成母版), 见 references/validation.md。 */
+    ZG.__selftest = {
+        isNoRefraction: isNoRefraction,
+        limitSubs: limitSubs,
+        simplifyMaskSubs: simplifyMaskSubs,
+        subSignedArea: subSignedArea,
+        subPerimeter: subPerimeter,
+        genMoireRadial: genMoireRadial,
+        getRegionSubs: getRegionSubs,
+        subsBBox: subsBBox,
+        subsPxToPt: subsPxToPt,
+        MAX_SUBPATHS: MAX_SUBPATHS
+    };
 }());

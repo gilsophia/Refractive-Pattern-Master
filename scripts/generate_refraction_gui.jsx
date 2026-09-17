@@ -6,14 +6,15 @@
 (function () {
     var scriptDir = new File($.fileName).parent.fsName;
 
-    var PATTERNS = ['parallel', 'facet', 'flow', 'wave', 'zigzag', 'chevron', 'feather', 'herringbone', 'bilateral_flow', 'meander', 'contour', 'topographic', 'radial', 'fan', 'cone', 'sunburst', 'concentric', 'ripple', 'spiral', 'vortex', 'petal_rosette', 'diamond_lattice', 'triangle_lattice', 'hex_lattice', 'checker', 'carbon_fiber', 'scale', 'dash_field', 'dot_field', 'short_curve'];
+    var PATTERNS = ['parallel', 'facet', 'flow', 'wave', 'zigzag', 'chevron', 'feather', 'herringbone', 'bilateral_flow', 'meander', 'contour', 'topographic', 'radial', 'fan', 'cone', 'sunburst', 'concentric', 'ripple', 'spiral', 'vortex', 'petal_rosette', 'diamond_lattice', 'diamond_tri', 'moire_radial', 'triangle_lattice', 'hex_lattice', 'checker', 'carbon_fiber', 'scale', 'dash_field', 'dot_field', 'short_curve'];
     /* 纹样键 -> 中文名(取自 references/design-logic.md 的定稿命名)。下拉菜单显示中文, 内部仍用键名传参。 */
     var PATTERN_LABELS = {
         parallel: '单向平行纹', facet: '折面平行纹', flow: '顺势流线', wave: '平行波纹', zigzag: '连续折线纹',
         chevron: '鱼骨纹', feather: '羽片纹', herringbone: '人字错列纹', bilateral_flow: '双向流线',
         meander: '回纹', contour: '等距轮廓纹', topographic: '地形等高纹', radial: '放射纹', fan: '扇形纹',
         cone: '锥形束纹', sunburst: '分区爆发纹', concentric: '同心纹', ripple: '涟漪纹', spiral: '螺旋纹',
-        vortex: '涡旋流场', petal_rosette: '花瓣玫瑰纹', diamond_lattice: '菱形网格', triangle_lattice: '三角网格',
+        vortex: '涡旋流场', petal_rosette: '花瓣玫瑰纹', diamond_lattice: '菱形网格', diamond_tri: '三角菱格纹',
+        moire_radial: '辐射摩尔纹', triangle_lattice: '三角网格',
         hex_lattice: '六角蜂巢纹', checker: '棋盘方向纹', carbon_fiber: '碳纤维纹', scale: '鳞片纹',
         dash_field: '错相短线场', dot_field: '点阵纹', short_curve: '稀疏短曲线'
     };
