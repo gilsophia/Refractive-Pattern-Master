@@ -16,13 +16,13 @@
 3. 弹窗内：点选图层 → 勾选「生成折光纹」、选纹样、填参数 →「应用到当前层」或「应用到全部启用层」。
 4. 点「生成」，选输出目录，得到 `ZG_master_<时间戳>.psd` 与 `master_report_<时间戳>.txt`。
 
-GUI 中最小线宽固定 `0.10 mm`；隐藏层默认不生成（可手动勾选启用）。下拉提供全部已实现纹样（见下表），**菜单里显示中文名**（如 `折面平行纹`、`回纹`、`六角蜂巢纹`），图层列表行里写成「中文名(键名)」便于和 `job.json`、文档对照；内部仍按键名传参，中文名与键的对应取自 `design-logic.md` 的定稿命名。`高级参数` 框可用逗号分隔 `key=value` 传入如 `branch_angle_deg=30, sector_count=10, petal_count=8, fan_arc_deg=90`。
+GUI 中最小线宽固定 `0.10 mm`；隐藏层默认不生成（可手动勾选启用）。下拉提供全部已实现纹样（见下表），**菜单里显示中文名**（如 `折面平行纹`、`回纹`、`六角蜂巢纹`），图层列表行里写成「中文名(键名)」便于和 `job.json`、文档对照；内部仍按键名传参，中文名与键的对应取自 `design-logic.md` 的定稿命名。`高级参数` 框可用逗号分隔 `key=value` 传入如 `branch_angle_deg=30, petal_count=14, fan_arc_deg=90`。
 
 ### 智能建议（本地规则）
 
 GUI 内置**确定性启发式建议**：选中图层即显示一行「建议: …(原因)」，可用「建议当前层 / 建议全部」一键采纳。规则为：
 
-1. 图层名关键词匹配（中英文，见 `refraction_core.jsx` 的 `suggest` 表）：如「头发/hair→flow、脸/face→跳过、**边框/框/frame/边饰→diamond_tri（三角菱格纹）**、**背景/bg/天空/大面积→moire_radial（辐射摩尔纹）**、云/cloud→contour、水/water→wave、光环/halo→radial、羽/wing→feather、花/petal→petal_rosette、回纹/迷宫→meander、鳞/scale→scale、科技→hex_lattice、文字/text→跳过」等。
+1. 图层名关键词匹配（中英文，见 `refraction_core.jsx` 的 `suggest` 表）：如「头发/hair→flow、脸/face→跳过、**边框/框/frame/边饰→diamond_tri（三角菱格纹）**、**背景/bg/天空/大面积→moire_radial（辐射摩尔纹）**、云/cloud→contour、水/water→wave、光环/halo→fan、羽/wing→feather、花/petal→petal_rosette、回纹/迷宫→meander、鳞/scale→scale、科技→hex_lattice、文字/text→跳过」等。
 2. 图层名含「不加折光 / 不折光 / 不做 / 跳过 / skip」等 → 照常按原优先度生成、输出组生成后隐藏（见下节）。
 3. 几何兜底：细长（长宽比>3）→ flow（方向沿长轴）；占画布<3% 的小区域 → short_curve；占画布>60% 的大面积 → moire_radial；否则 → parallel。
 
@@ -60,11 +60,10 @@ GUI 内置**确定性启发式建议**：选中图层即显示一行「建议: �
 | `amplitude_mm` | 振幅（wave/zigzag）、鱼骨分支长基准（feather）、鳞片/点阵半径（scale/dot_field/petal 瓣宽）、辐射摩尔纹的圆心错位量（moire_radial，决定摩尔条纹疏密，默认 0.9mm） |
 | `wavelength_mm` | 波长（wave/zigzag）；网格/单元格大小（herringbone/meander/lattice/checker/carbon/scale/hex/dot_field/**diamond_tri** 等） |
 | `gradient_axis` / `dense_end` | 密度渐变轴（`vertical`/`horizontal`/`none`）与密端（`top`/`bottom`/`left`/`right`） |
-| `center_x` / `center_y` / `inner_radius_mm` | 中心类纹样中心（0–1 为画布比例，>1 视为 mm）与中心留空/起始半径。**未填内径时按「线宽+中隙」自动取 8 倍基准间距**（radial/fan/cone/sunburst；moire_radial 取区域半径的 1/4，并在内圈用同间距同心圆环收口），避免旧版默认 0 时只生成两三条射线；moire_radial 显式填了内径则按指定值留空、不加环 |
+| `center_x` / `center_y` / `inner_radius_mm` | 中心类纹样中心（0–1 为画布比例，>1 视为 mm）与中心留空/起始半径。未填内径时 fan 按「线宽+中隙」取起始半径并在外侧逐级补线；moire_radial 的外圈起始半径约取区域半径的 1/4，内圈以射线逐层减半、分叉收束到中心。moire_radial 显式填了内径则按指定值留空、不做内圈分叉 |
 | `segment_length_mm` | 短线长（short_curve/dash_field/carbon_fiber） |
 | `branch_angle_deg` | 鱼骨/羽片分支与主轴夹角（默认 45） |
-| `sector_count` | sunburst 扇区数（默认 8） |
-| `petal_count` | petal_rosette 花瓣数（默认 6） |
+| `petal_count` | petal_rosette 花瓣数（默认 14） |
 | `fan_arc_deg` | fan 扇形展开角（默认 120） |
 | `path_tolerance_px` | 透明度→路径取样容差，越小越精确但节点越多 |
 
@@ -74,22 +73,20 @@ GUI 内置**确定性启发式建议**：选中图层即显示一行「建议: �
 
 | 键 | 中文 | 宏内实现 | 键 | 中文 | 宏内实现 |
 |---|---|---|---|---|---|
-| `parallel` | 单向平行纹 | 实现（=facet 均匀） | `fan` | 扇形纹 | 实现 |
-| `facet` | 折面平行纹 | 实现 | `cone` | 锥形/透视束纹 | 实现 |
-| `flow` | 顺势流线 | 实现 | `sunburst` | 分区爆发纹 | 实现 |
-| `wave` | 平行波纹 | 实现 | `concentric` | 同心纹 | 实现 |
-| `zigzag` | 连续折线纹 | 实现 | `ripple` | 涟漪纹 | 实现（三心同心近似） |
-| `chevron` | 鱼骨/脊线纹 | 实现（脊线+斜支） | `spiral` | 螺旋纹 | 实现 |
-| `feather` | 羽片纹 | 实现（脊线+弯支） | `vortex` | 涡旋流场 | 实现（双臂螺旋近似） |
-| `herringbone` | 人字错列纹 | 实现 | `petal_rosette` | 花瓣玫瑰纹 | 实现（椭圆花瓣） |
-| `bilateral_flow` | 双向流线 | 实现（中缝留白） | `diamond_lattice` | 菱形网格 | 实现（两组斜线） |
-| `meander` | 回纹/迷宫纹 | 实现（简化） | `diamond_tri` | 三角菱格纹 | 实现（正倒三角咬合成菱形，格内有细线） |
-| `contour` | 等距轮廓纹 | 实现 | `moire_radial` | 辐射摩尔纹 | 实现（三组微错位放射线干涉） |
-| `topographic` | 地形等高纹 | 实现（=contour） | `triangle_lattice` | 三角网格 | 实现（三组线） |
-| `radial` | 放射纹 | 实现 | `hex_lattice` | 六角蜂巢纹 | 实现 |
-| `scale` | 鳞片纹 | 实现（弧形搭接） | `checker` | 棋盘方向纹 | 实现 |
-| `dot_field` | 点阵/环点场 | 实现（环点） | `carbon_fiber` | 碳纤维纹 | 实现 |
-| `short_curve` | 稀疏短曲线 | 实现 | `dash_field` | 错相短线场 | 实现 |
+| `parallel` | 单向平行纹 | 实现（=facet 均匀） | `fan` | 扇形纹 | 实现（外侧逐级补线） |
+| `facet` | 折面平行纹 | 实现 | `concentric` | 同心纹 | 实现 |
+| `flow` | 顺势流线 | 实现 | `ripple` | 涟漪纹 | 实现（三心同心近似） |
+| `wave` | 平行波纹 | 实现 | `vortex` | 涡旋流场 | 实现（双臂螺旋近似） |
+| `zigzag` | 连续折线纹 | 实现 | `petal_rosette` | 花瓣玫瑰纹 | 实现（默认 14 瓣） |
+| `chevron` | 鱼骨/脊线纹 | 实现（脊线+斜支） | `diamond_lattice` | 菱形网格 | 实现（两组斜线） |
+| `feather` | 羽片纹 | 实现（脊线+弯支） | `diamond_tri` | 三角菱格纹 | 实现（正倒三角咬合成菱形，格内有细线） |
+| `herringbone` | 人字错列纹 | 实现 | `moire_radial` | 辐射摩尔纹 | 实现（三组微错位放射线干涉） |
+| `bilateral_flow` | 双向流线 | 实现（中缝留白） | `triangle_lattice` | 三角网格 | 实现（三组线） |
+| `meander` | 回纹/迷宫纹 | 实现（较小单元） | `hex_lattice` | 六角蜂巢纹 | 实现 |
+| `contour` | 等距轮廓纹 | 实现 | `checker` | 棋盘方向纹 | 实现 |
+| `topographic` | 地形等高纹 | 实现（=contour） | `carbon_fiber` | 碳纤维纹 | 实现（密排错列短线） |
+| `scale` | 鳞片纹 | 实现（密排弧形） | `dash_field` | 错相短线场 | 实现 |
+| `dot_field` | 点阵/环点场 | 实现（密排环点） | `short_curve` | 稠密短曲线 | 实现（隔行错列） |
 
 **未实现（设计意图，宏会明确报错）**：`interlace`、`braid`、`cube_iso`、`guilloche`、`organic_field`，以及 F 组复合光学纹 `moire_pair`、`angle_switch`、`density_switch`、`latent_image`、`image_switch`。这些涉及交叉断口、随形变形场、遮罩第二图或对位/材料敏感，需按 [工作流](../工作流.md) 手工制作。
 
@@ -143,7 +140,7 @@ ZG_OUT__051__front(person+falcon)-*不折光        ← 容器组, 无蒙版, �
 - 取样容差 `path_tolerance_px` 越小节点越多、越慢（默认 1 px）。大面积复杂图层可适当放大容差以缩短耗时。
 - 区域来自**透明度→工作路径**取样，非严格矢量边界；存在抗锯齿偏移与容差误差，未做半线宽内缩与尖碎片清理。生产版仍建议按 `references/photoshop-workflow.md` 复检净隙/线宽。
 - 恒宽由局部法线偏移近似；chevron/feather 尖角、herringbone/meander 折角、网格交点处可能有轻微失真，请放大复检。
-- **单元类纹样的格子尺寸由「线宽+中隙」推导**（`unitCellPx`），不再直接用 `wavelength_mm`：旧版把 12mm 当格子用，600ppi 下格距 283px，与其它纹样的基准间距（≈7px）差约 40 倍，回纹/人字/蜂巢/碳纤维/鳞片/点阵因此只有两三条线。现在 `wavelength_mm` 仍可放大单元，但会换算成基准间距的倍数并夹在合理区间（回纹 1–4、人字 2–5、蜂巢 1–4、鳞片/点阵 2–4；碳纤维取「纤维长+间距」）。同时修正了旧版会叠线/相切的几何：回纹行距改为 `单元+基准间距`（隔行错相）、蜂巢六边形按比例内缩、鳞片弧半径 0.45→0.36 单元、点阵半径按网格与净隙收敛。实测（600ppi、0.15mm 线、22.3mm 方块）：回纹 2→17 条、蜂巢 195 格、鳞片 475 格，各纹样最小净距 0.17–0.60mm，均不低于 0.12mm 下限。
+- **单元类纹样的格子尺寸由「线宽+中隙」推导**（`unitCellPx`），不再直接用 `wavelength_mm`。手绘修订后进一步收紧回纹、蜂巢、鳞片、点阵；碳纤维改为按线宽和净隙错列短斜线；短曲线保留短弧并隔行错半格，消除贯通的列间空带。大面积生成时仍需按实际线宽、净隙和处理时间复核。
 - 多心/网格类纹样（ripple/checker/carbon/scale/hex/dot_field/dash_field 等）会生成大量小形状，大区域可能较慢；dash/checker 等会产生数千多边形，逐形状层分批写入。
 - `contour`（同心等距）从区域外轮廓做斜接内缩生成同心环带；孔洞环被跳过、内圈塌陷即停。对简单/浅凹多边形可靠，深凹或细长区域环带可能变形。环带基线按周长自适应重采样（每条 ≤400 点），避免单条子路径超过 1000 点上限。
 - 仅生成总母版 PSD；若要逐层透明 PNG/PSD，`export_groups.jsx` 的 `check()` 会因叶子层无各自矢量蒙版而报错，需先适配组级蒙版。

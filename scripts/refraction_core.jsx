@@ -2,10 +2,15 @@
  * 由 generate_refraction.jsx (job.json 模式) 与 generate_refraction_gui.jsx (手动分配模式) 通过 $.evalFile 共用。
  * 不包含 UI 与 JSON 解析, 只暴露 ZG.generate / ZG.collectLayers 等。 */
 var ZG = {};
-var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实际运行的版本
+var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实际运行的版本
 
 (function () {
     var c = charIDToTypeID, s = stringIDToTypeID;
+
+    /* 进度日志: generate() 会把写文件的实现注册到 plogImpl;
+     * 取样等模块级函数(如 getRegionSubs)用 plog 输出诊断, 未注册时静默丢弃。 */
+    var plogImpl = null;
+    function plog(m) { if (plogImpl) { try { plogImpl(m); } catch (eP) {} } }
 
     function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
     function smooth(u) { u = clamp(u, 0, 1); return u * u * (3 - 2 * u); }
@@ -219,6 +224,37 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
         desc.putReference(c('T   '), ref1);
         executeAction(c('setd'), desc, DialogModes.NO);
     }
+    /* 图层是否"向下剪贴"到下面一层(剪贴蒙版)。
+     * PS 2020 实测: 图层描述符里是布尔键 'group'(不是 'grouped'), 剪贴层为 true、基底为 false。 */
+    function isClippedLayer(layer) {
+        try {
+            var ref = new ActionReference(); ref.putIdentifier(s('layer'), layer.id);
+            var d = executeActionGet(ref);
+            return d.hasKey(s('group')) && d.getBoolean(s('group'));
+        } catch (e) { return false; }
+    }
+    /* 找剪贴基底: DOM 里 layers[0] 是最上层, 所以"下面一层"是索引增大的方向。
+     * 从该层往下找第一个非剪贴层; 同一容器找完还没有, 就向父级继续找(跨组剪贴的少数情况)。 */
+    function findClipBase(doc, layer) {
+        var chain = [];
+        function locate(container) {
+            for (var i = 0; i < container.layers.length; i++) {
+                var l = container.layers[i];
+                if (l.id === layer.id) { chain.push({ c: container, i: i }); return true; }
+                if (l.typename === 'LayerSet' && locate(l)) { chain.push({ c: container, i: i }); return true; }
+            }
+            return false;
+        }
+        if (!locate(doc)) return null;
+        for (var k = 0; k < chain.length; k++) {
+            var c0 = chain[k].c, idx = chain[k].i;
+            for (var j = idx + 1; j < c0.layers.length; j++) {
+                var b = c0.layers[j];
+                if (!isClippedLayer(b)) return b;
+            }
+        }
+        return null;
+    }
     function subInfosFromPath(path, doc) {
         var out = [];
         for (var i = 0; i < path.subPathItems.length; i++) {
@@ -426,7 +462,7 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
             }
             points += n; total += n;
             if (total > 250000 || i >= 60000)
-                throw new Error('单区域纹样超过安全预算（60000 条 / 250000 节点），请放大「容差px」、加大线宽净隙或拆成多个区域分次生成；未截断纹样');
+                throw new Error('单区域纹样超过安全预算（60000 条 / 250000 节点），实际 ' + (i + 1) + ' 条 / ' + total + ' 节点；请放大「容差px」、加大线宽净隙或拆成多个区域分次生成；未截断纹样');
         }
         if (start < polys.length) batches.push({ start: start, end: polys.length, points: points });
         return { batches: batches, points: total };
@@ -557,13 +593,23 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
                  * 这样「避免重叠」按列表顺序累加时, 细节纹样(子层)优先, 组容器只补空隙。 */
                 var p = prefix + l.name;
                 collectLayers(l, p + '/', out);
-                out.push({ layer: l, path: p, name: l.name, type: 'LayerSet', kind: 'LayerSet', visible: l.visible, bounds: bnd(l) });
+                out.push({ layer: l, id: l.id, path: p, name: l.name, type: 'LayerSet', kind: 'LayerSet', visible: l.visible, bounds: bnd(l) });
                 continue;
             }
             var kind = '';
             try { kind = String(l.kind); } catch (e2) {}
-            out.push({ layer: l, path: prefix + l.name, name: l.name, type: l.typename, kind: kind, visible: l.visible, bounds: bnd(l) });
+            out.push({ layer: l, id: l.id, path: prefix + l.name, name: l.name, type: l.typename, kind: kind, visible: l.visible, bounds: bnd(l) });
         }
+    }
+    /* 按图层 ID 在整棵图层树里找层: 名字含 '/' 的层(如中文版自动命名的"色相/饱和度/明度 3")
+     * 与同名层都能正确定位 —— 路径字符串只用于显示和人工核对。 */
+    function findLayerById(container, id) {
+        for (var i = 0; i < container.layers.length; i++) {
+            var l = container.layers[i];
+            if (l.id === id) return l;
+            if (l.typename === 'LayerSet') { var r = findLayerById(l, id); if (r) return r; }
+        }
+        return null;
     }
 
     /* ---------------- "不折光"标记 (模糊识别) ----------------
@@ -590,6 +636,12 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
         var bd = info.bounds;
         var r = { pattern: 'facet', direction_deg: 0, skip: false, hide: false, reason: '' };
         if (isNoRefraction(name)) { r.hide = true; r.reason = '名称含不折光标记 → 照常生成但输出组隐藏'; return r; }
+        /* 调整层(色阶/曲线/颜色查找/色相饱和度等)没有自己的像素, 取样必为空, 默认跳过。 */
+        var adjKinds = ['LEVELS', 'CURVES', 'COLORLOOKUP', 'HUESATURATION', 'BRIGHTNESSCONTRAST', 'VIBRANCE', 'EXPOSURE', 'COLORBALANCE', 'BLACKANDWHITE', 'PHOTOFILTER', 'CHANNELMIXER', 'INVERSION', 'POSTERIZE', 'THRESHOLD', 'SELECTIVECOLOR', 'GRADIENTMAP'];
+        var kindStr = String(info.kind || '').toUpperCase();
+        for (var ak = 0; ak < adjKinds.length; ak++) {
+            if (kindStr.indexOf(adjKinds[ak]) >= 0) { r.skip = true; r.reason = '调整层 → 无需生成纹样'; return r; }
+        }
         var table = [
             [/脸|face|皮肤|skin|五官|眼睛|眼|口|鼻|唇|五官/i, { skip: true, why: '面部/五官 → 留白' }],
             [/文字|标题|title|logo|签名|水印|text|字/i, { skip: true, why: '文字/签名 → 通常不加纹' }],
@@ -599,12 +651,12 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
             [/飘带|丝带|衣|布|裙|袖|袍|cloth|fabric|ribbon|带/i, { pattern: 'flow', why: '织物/飘带 → flow' }],
             [/羽|翅|翼|feather|wing/i, { pattern: 'feather', why: '羽翼 → feather' }],
             [/花|花瓣|flower|petal|玫瑰|rose/i, { pattern: 'petal_rosette', why: '花卉 → petal_rosette' }],
-            [/光环|光晕|光芒|光线|放射|太阳|日轮|ray|sun|halo|星芒|radial/i, { pattern: 'radial', why: '光环/太阳 → radial' }],
+            [/光环|光晕|光芒|光线|放射|太阳|日轮|ray|sun|halo|星芒|radial/i, { pattern: 'fan', why: '光环/太阳 → 扇形纹' }],
             [/圆|币|coin|表盘|镜|盘|环|ring/i, { pattern: 'concentric', why: '圆/盘 → concentric' }],
             [/边框|框|border|边饰|花边|frame|饰带|菱格|三角/i, { pattern: 'diamond_tri', why: '边框/边饰 → 三角菱格纹' }],
             [/回纹|迷宫|meander|希腊/i, { pattern: 'meander', why: '回纹 → meander' }],
             [/鳞|鱼鳞|龙鳞|scale|甲/i, { pattern: 'scale', why: '鳞片 → scale' }],
-            [/涡|旋|漩涡|spiral|vortex|星云/i, { pattern: 'spiral', why: '漩涡 → spiral' }],
+            [/涡|旋|漩涡|spiral|vortex|星云/i, { pattern: 'vortex', why: '漩涡 → 涡旋纹' }],
             [/科技|机械|电路|机甲|装甲|蜂巢|honey|tech/i, { pattern: 'hex_lattice', why: '科技/机械 → hex_lattice' }],
             [/石|建筑|墙|砖|building|城堡|岩石/i, { pattern: 'facet', why: '建筑/硬质 → facet' }],
             [/背景|天空|底|background|bg|夜空|大面积/i, { pattern: 'moire_radial', why: '背景/大面积 → 辐射摩尔纹' }],
@@ -722,27 +774,67 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
                 resetTempDoc(temp);
             }
             tMark = new Date().getTime();
+            /* 剪贴蒙版(向下剪贴)的图层: 单独复制到临时文档会因失去基底而渲染为空(001 实测:
+             * 二分1/高光1/高光2/图层 4 等 5 个剪贴层全部被判 EMPTY)。
+             * 正确区域 = 该层自身透明通道(不受剪贴影响) ∩ 剪贴基底渲染出的可见 alpha。
+             * 剪贴关系用 ActionManager 的布尔键 'group' 判断(PS 2020 实测, 不是 'grouped')。
+             * 注意: ActionManager 的图层引用只在当前文档里解析, 上面刚建/复位过临时文档,
+             * 必须先切回源文档再判断, 否则 id 对不上会被误判成非剪贴层。 */
             app.activeDocument = doc;
+            var clipped = isClippedLayer(layer), clipBase = null;
+            if (clipped) {
+                clipBase = findClipBase(doc, layer);
+                if (!clipBase) { plog('剪贴层找不到剪贴基底, 按不可见处理: ' + layer.name); return []; }
+                if (!clipBase.visible) { plog('剪贴基底不可见, 按不可见处理: ' + layer.name + ' ← ' + clipBase.name); return []; }
+                plog('剪贴层识别: ' + layer.name + ' ← 基底 ' + clipBase.name);
+            }
             stage = '复制待取样图层';
             var copied = layer.duplicate(temp, ElementPlacement.PLACEATBEGINNING);
             app.activeDocument = temp;
             copied.visible = true;
             tDup = new Date().getTime();
-            stage = '渲染图层及蒙版';
-            // 透明底 + 复制来的图层, 用 mergeVisibleLayers 渲染文字/智能对象/组, 不碰源文档。
             var raster = null;
-            try {
-                temp.mergeVisibleLayers();
-                raster = temp.activeLayer;
-            } catch (eMerge) {   // 个别版本/图层类型合并失败时退化处理
-                raster = copied;
-                plog('警告: mergeVisibleLayers 失败, 改用复制图层本身: ' + (eMerge && eMerge.message ? eMerge.message : String(eMerge)));
+            if (clipped) {
+                stage = '读取剪贴层自身透明度';
+                loadTransparency(temp, copied);
+                try { temp.selection.bounds; } catch (eEmptyClip) { return []; }
+                var regionCh = temp.channels.add();
+                regionCh.name = 'ZG_clip_region';
+                temp.selection.store(regionCh);
+                stage = '渲染剪贴基底';
+                try { resetTempDoc(temp); } catch (eRT) {}
+                app.activeDocument = doc;
+                var baseCopy = clipBase.duplicate(temp, ElementPlacement.PLACEATBEGINNING);
+                app.activeDocument = temp;
+                baseCopy.visible = true;
+                try { temp.mergeVisibleLayers(); raster = temp.activeLayer; }
+                catch (eMerge2) {
+                    raster = baseCopy;
+                    plog('警告: 剪贴基底 mergeVisibleLayers 失败, 改用复制图层本身: ' + (eMerge2 && eMerge2.message ? eMerge2.message : String(eMerge2)));
+                }
+                tMerge = new Date().getTime();
+                var rb2 = raster.bounds;
+                if (toNum(rb2[2]) <= toNum(rb2[0]) || toNum(rb2[3]) <= toNum(rb2[1])) { try { regionCh.remove(); } catch (eC0) {} return []; }
+                stage = '载入剪贴基底透明度';
+                loadTransparency(temp, raster);
+                temp.selection.load(regionCh, SelectionType.INTERSECT);
+                try { regionCh.remove(); } catch (eC1) {}
+            } else {
+                stage = '渲染图层及蒙版';
+                // 透明底 + 复制来的图层, 用 mergeVisibleLayers 渲染文字/智能对象/组/图层样式, 不碰源文档。
+                try {
+                    temp.mergeVisibleLayers();
+                    raster = temp.activeLayer;
+                } catch (eMerge) {   // 个别版本/图层类型合并失败时退化处理
+                    raster = copied;
+                    plog('警告: mergeVisibleLayers 失败, 改用复制图层本身: ' + (eMerge && eMerge.message ? eMerge.message : String(eMerge)));
+                }
+                tMerge = new Date().getTime();
+                var rb = raster.bounds;
+                if (toNum(rb[2]) <= toNum(rb[0]) || toNum(rb[3]) <= toNum(rb[1])) return [];
+                stage = '载入渲染透明度';
+                loadTransparency(temp, raster);
             }
-            tMerge = new Date().getTime();
-            var rb = raster.bounds;
-            if (toNum(rb[2]) <= toNum(rb[0]) || toNum(rb[3]) <= toNum(rb[1])) return [];
-            stage = '载入渲染透明度';
-            loadTransparency(temp, raster);
             var bd;
             try { bd = temp.selection.bounds; } catch (emptySelection) { return []; }
             if (toNum(bd[2]) <= toNum(bd[0]) || toNum(bd[3]) <= toNum(bd[1])) return [];
@@ -985,7 +1077,7 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
          * 隔行错开一个单元形成咬合。旧版行距=单元, 相邻行的波峰波谷正好重合, 既过疏又会叠线。 */
         var p = projections(b, cfg), half = cfg.linePx / 2, polys = [];
         var pitch = cfg.linePx + cfg.gapMidPx;
-        var cell = unitCellPx(cfg, 1, 4);
+        var cell = unitCellPx(cfg, 1, 2.5);
         var rowStep = cell + pitch;              // 行带高 = cell, 行间再留一个基准净距
         var rows = Math.max(1, Math.round((p.smax - p.smin) / rowStep));
         for (var r = 0; r < rows; r++) {
@@ -1004,45 +1096,27 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
         }
         return polys;
     }
-    function genRadial(b, cfg) {
-        var cx = cfg.cxPx, cy = cfg.cyPx, corners = [[b.x0, b.y0], [b.x1, b.y0], [b.x0, b.y1], [b.x1, b.y1]], R = 0;
-        for (var k = 0; k < 4; k++) { var ox = corners[k][0] - cx, oy = corners[k][1] - cy, dd = Math.sqrt(ox * ox + oy * oy); if (dd > R) R = dd; }
-        R += cfg.linePx + cfg.gapSparsePx;
-        var r0 = defaultInnerRadius(cfg, R);
-        var dtheta = (cfg.linePx + cfg.gapDensePx) / r0;
-        var n = Math.floor(2 * Math.PI / dtheta); if (n < 2) n = 2;
-        var step = 2 * Math.PI / n, polys = [];
-        for (var i = 0; i < n; i++) {
-            var th = i * step, d0 = cfg.linePx / (2 * r0), d1 = cfg.linePx / (2 * R);
-            polys.push([
-                [cx + r0 * Math.cos(th - d0), cy + r0 * Math.sin(th - d0)],
-                [cx + R * Math.cos(th - d1), cy + R * Math.sin(th - d1)],
-                [cx + R * Math.cos(th + d1), cy + R * Math.sin(th + d1)],
-                [cx + r0 * Math.cos(th + d0), cy + r0 * Math.sin(th + d0)]
-            ]);
-        }
-        return polys;
-    }
     function genShortCurve(b, cfg) {
         var L = cfg.segLenPx, w = cfg.linePx;
         if (!(L > 0 && w > 0)) throw new Error('short_curve: 线长和线宽必须大于零');
         var p = projections(b, cfg), polys = [];
-        var gap = cfg.gradientAxis === 'none' ? cfg.gapMidPx :
-            Math.max(cfg.gapDensePx, cfg.gapMidPx, cfg.gapSparsePx);
-        // Use one continuous wave phase for every row. Alternating row phases
-        // collide when densely packed. Reserve width as well as clear gap at ends.
+        var gap = cfg.gapDensePx;
+        // Keep one continuous wave phase, but stagger the short segments by half
+        // a cell on alternate rows so the column seams never align into empty bands.
         var cut = w + gap, cell = L + cut;
         var bend = Math.min(Math.abs(cfg.ampPx), L * 0.30);
         var slope = Math.PI * bend / cell;
-        var pitch = (w + gap) * Math.sqrt(1 + slope * slope);
+        var pitch = (w + cfg.gapMidPx) * Math.sqrt(1 + slope * slope);
         // This Lipschitz bound guarantees normal clearance between translated
         // curves, even at the steepest part of a wave. Length no longer sets pitch.
-        for (var ss = p.smin - bend; ss <= p.smax + bend; ss += pitch) {
-            var first = Math.floor(p.tmin / cell), last = Math.ceil(p.tmax / cell);
+        for (var ss = p.smin - bend, row = 0; ss <= p.smax + bend; ss += pitch, row++) {
+            var phase = (row % 2) * cell / 2;
+            var first = Math.floor((p.tmin - phase) / cell) - 1;
+            var last = Math.ceil((p.tmax - phase) / cell) + 1;
             for (var j = first; j < last; j++) {
                 var pts = [];
                 for (var k = 0; k <= 24; k++) {
-                    var t = j * cell + cut / 2 + L * k / 24;
+                    var t = j * cell + phase + cut / 2 + L * k / 24;
                     var sn = ss + bend * Math.sin(Math.PI * t / cell);
                     pts.push([p.cx + t * p.dx + sn * p.nx, p.cy + t * p.dy + sn * p.ny]);
                 }
@@ -1059,8 +1133,7 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
         for (var k = 0; k < 4; k++) { var dx = corners[k][0] - cx, dy = corners[k][1] - cy; var d = Math.sqrt(dx * dx + dy * dy); if (d > R) R = d; }
         return R;
     }
-    /* 中心类纹样的起始半径: 未指定内径时按「线宽+中隙」推导, 避免默认 0 导致内半径只有半条线宽、
-     * 角间距过大而只生成两三条射线(旧版 radial 在大面积上实测只有 3 条线)。 */
+    /* 中心类纹样的起始半径按线宽与净隙推导，避免只生成少数射线。 */
     function defaultInnerRadius(cfg, R) {
         if (cfg.innerRadiusPx > 0) return Math.max(cfg.innerRadiusPx, cfg.linePx);
         var pitch = cfg.linePx + cfg.gapMidPx;
@@ -1101,41 +1174,21 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
         var cx = cfg.cxPx, cy = cfg.cyPx, R = maxDistFrom(b, cx, cy) + cfg.linePx + cfg.gapSparsePx;
         var r0 = defaultInnerRadius(cfg, R);
         var arc = cfg.fanArcRad || (Math.PI * 2 / 3), base = cfg.dirRad - arc / 2;
-        var dtheta = (cfg.linePx + cfg.gapDensePx) / r0, n = Math.max(1, Math.floor(arc / dtheta)), polys = [];
-        for (var i = 0; i < n; i++) polys.push(wedge(cx, cy, r0, R, base + arc * i / n, cfg.linePx));
-        return polys;
-    }
-    function genCone(b, cfg) {
-        var cx = cfg.cxPx, cy = cfg.cyPx;
-        var corners = [[b.x0, b.y0], [b.x1, b.y0], [b.x0, b.y1], [b.x1, b.y1]], angs = [], rmin = 1e18, rmax = 0;
-        for (var k = 0; k < 4; k++) {
-            var dx = corners[k][0] - cx, dy = corners[k][1] - cy, d = Math.sqrt(dx * dx + dy * dy);
-            if (d < rmin) rmin = d; if (d > rmax) rmax = d; angs.push(Math.atan2(dy, dx));
+        var target = cfg.linePx + cfg.gapDensePx;
+        var n = Math.max(1, Math.floor(arc * r0 / target)), step = arc / n, polys = [];
+        function fill(a0, a1, depth) {
+            if (depth >= 8) return;
+            var mid = (a0 + a1) / 2;
+            // A new branch starts where its nearest neighbour has enough room.
+            var start = Math.max(r0, 2 * target / (a1 - a0));
+            if (start >= R) return;
+            polys.push(wedge(cx, cy, start, R, mid, cfg.linePx));
+            fill(a0, mid, depth + 1);
+            fill(mid, a1, depth + 1);
         }
-        angs.sort(function (a, b) { return a - b; });
-        var maxGap = 0, gapStart = 0;
-        for (var m = 0; m < 4; m++) {
-            var a0 = angs[m], a1 = (m === 3) ? angs[0] + 2 * Math.PI : angs[m + 1];
-            var g = a1 - a0; if (g > maxGap) { maxGap = g; gapStart = a0; }
-        }
-        var span = 2 * Math.PI - maxGap, aMin = gapStart + maxGap;
-        var inside = (cx >= b.x0 && cx <= b.x1 && cy >= b.y0 && cy <= b.y1);
-        var rNear = inside ? defaultInnerRadius(cfg, rmax) : rmin;
-        if (rNear < cfg.linePx) rNear = cfg.linePx;
-        var R = rmax + cfg.linePx + cfg.gapSparsePx;
-        var dtheta = (cfg.linePx + cfg.gapDensePx) / rNear, n = Math.max(1, Math.floor(span / dtheta)), polys = [];
-        for (var i = 0; i <= n; i++) polys.push(wedge(cx, cy, rNear, R, aMin + span * i / n, cfg.linePx));
-        return polys;
-    }
-    function genSunburst(b, cfg) {
-        var cx = cfg.cxPx, cy = cfg.cyPx, R = maxDistFrom(b, cx, cy) + cfg.linePx + cfg.gapSparsePx;
-        var r0 = defaultInnerRadius(cfg, R);
-        var n = cfg.sectorCount || 8, sec = 2 * Math.PI / n, polys = [];
-        for (var k = 0; k < n; k++) {
-            var gap = (k % 2 === 0) ? cfg.gapDensePx : cfg.gapSparsePx;
-            var dtheta = (cfg.linePx + gap) / r0, m = Math.max(1, Math.floor(sec / dtheta)), step = sec / m;
-            for (var i = 0; i < m; i++) polys.push(wedge(cx, cy, r0, R, k * sec + i * step, cfg.linePx));
-        }
+        for (var i = 0; i <= n; i++)
+            polys.push(wedge(cx, cy, r0, R, base + step * i, cfg.linePx));
+        for (var j = 0; j < n; j++) fill(base + step * j, base + step * (j + 1), 0);
         return polys;
     }
     function genConcentric(b, cfg) {
@@ -1154,14 +1207,6 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
         }
         return polys;
     }
-    function genSpiral(b, cfg) {
-        var cx = cfg.cxPx, cy = cfg.cyPx, R = maxDistFrom(b, cx, cy);
-        var a = cfg.innerRadiusPx + cfg.linePx; if (a < cfg.linePx) a = cfg.linePx;
-        var grow = (cfg.linePx + cfg.gapMidPx) / (2 * Math.PI), thMax = (R - a) / grow; if (thMax <= 0) return [];
-        var steps = 600, pts = [];
-        for (var i = 0; i <= steps; i++) { var th = thMax * i / steps, r = a + grow * th; pts.push([cx + r * Math.cos(th), cy + r * Math.sin(th)]); }
-        return [offsetPolyline(pts, cfg.linePx / 2)];
-    }
     function genVortex(b, cfg) {
         var cx = cfg.cxPx, cy = cfg.cyPx, R = maxDistFrom(b, cx, cy);
         var a = cfg.innerRadiusPx + cfg.linePx; if (a < cfg.linePx) a = cfg.linePx;
@@ -1176,12 +1221,15 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
     }
     function genPetal(b, cfg) {
         var cx = cfg.cxPx, cy = cfg.cyPx, R = maxDistFrom(b, cx, cy) * 0.8;
-        var n = cfg.petalCount || 6, w = cfg.ampPx || (cfg.linePx * 3); if (w < cfg.linePx) w = cfg.linePx;
+        var n = cfg.petalCount || 14, w = cfg.ampPx || (cfg.linePx * 3); if (w < cfg.linePx) w = cfg.linePx;
         var polys = [];
+        var inner = Math.min(R * 0.24, Math.max(cfg.linePx * 2, (cfg.linePx + cfg.gapMidPx) * 2));
+        var mid = (R + inner) / 2, petalRadius = (R - inner) / 2;
         for (var k = 0; k < n; k++) {
             var ang = k * 2 * Math.PI / n;
-            polys.push(ellipseRibbon(cx + (R / 2) * Math.cos(ang), cy + (R / 2) * Math.sin(ang), R / 2, w, ang, cfg.linePx / 2));
+            polys.push(ellipseRibbon(cx + mid * Math.cos(ang), cy + mid * Math.sin(ang), petalRadius, w, ang, cfg.linePx / 2));
         }
+        polys.push(circleRibbon(cx, cy, inner * 0.7, cfg.linePx / 2));
         return polys;
     }
 
@@ -1198,7 +1246,7 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
         /* 蜂巢: 格子半径 = 基准间距的 1~4 倍; 六边形按比例内缩, 使相邻六边形之间留出净隙
          * (旧版半径 = wavelength/2 = 6mm, 且相邻六边形共用边会叠线)。 */
         var pitch = cfg.linePx + cfg.gapMidPx;
-        var r = unitCellPx(cfg, 1, 4);
+        var r = unitCellPx(cfg, 1, 3);
         var e = r - (pitch + cfg.linePx / 2) / Math.sqrt(3);   // 内缩量, 格间净距 ≈ 基准净隙(含线宽余量)
         if (e < r * 0.45) e = r * 0.45;
         var half = cfg.linePx / 2, polys = [], dx = Math.sqrt(3) * r, dy = 1.5 * r, row = 0;
@@ -1256,9 +1304,11 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
     }
     /* 辐射摩尔纹: 2~3 组圆心微错位、相位微错开的放射线族叠加, 线间交叉形成放射状摩尔条纹,
      * 压纹反光时呈现极光式流动感。适合大面积背景/夜空。
-     * 未指定内径时: 起始半径按区域大小取 1/4(保证外缘线距不过疏), 内圈用同间距同心圆环
-     * 收口 —— 否则中心会留一个半径达区域半径 1/4 的大圆空白(1200ppi 的 BG 层实测半径
-     * 583px ≈ 12mm, 直径接近卡宽一半)。显式指定 inner_radius_mm 时按指定值留空, 不加环。 */
+     * 未指定内径时: 外层起始半径按区域大小取 1/4(保证外缘线距不过疏), 内圈用「逐层分叉」收束 ——
+     * 每向内一层线条数减半、角间距不变, 一层层接到圆心, 中心只留极小的一点空白。
+     * 这样既不会留大片圆形空白(1200ppi 的 BG 层实测半径 583px ≈ 12mm, 直径接近卡宽一半),
+     * 也不会像"线条直通圆心"那样把中心糊成一大块实黑。
+     * 显式指定 inner_radius_mm 时按指定值留空, 不做分叉。 */
     function genMoireRadial(b, cfg) {
         var pitch = cfg.linePx + cfg.gapMidPx;
         var R0 = maxDistFrom(b, cfg.cxPx, cfg.cyPx) + cfg.linePx + cfg.gapSparsePx;
@@ -1271,28 +1321,36 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
         if (n > 720) n = 720;
         var amp = (cfg.ampPx && cfg.ampPx > 0) ? Math.max(cfg.ampPx, cfg.linePx * 2) : Math.max(cfg.linePx * 3, pitch * 2);   // 圆心错位量 → 决定摩尔条纹疏密
         var groups = [[0, 0], [1, 0], [0.34, 0.94]];
+        var step = 2 * Math.PI / n;
         var polys = [];
-        if (autoInner) {
-            /* 环形收口: 内圈用与外圈放射线同间距的同心圆环填满, 在 r0 处与射线接上 */
-            var ringPitch = cfg.linePx + cfg.gapDensePx, guard = 0;
-            for (var rr = ringPitch; rr <= r0 && guard < 5000; rr += ringPitch) {
-                polys.push(circleRibbon(cfg.cxPx, cfg.cyPx, rr, cfg.linePx / 2));
-                guard++;
-            }
-        }
         for (var g = 0; g < groups.length; g++) {
             var cx = cfg.cxPx + groups[g][0] * amp, cy = cfg.cyPx + groups[g][1] * amp;
             var Rg = maxDistFrom(b, cx, cy) + cfg.linePx + cfg.gapSparsePx;
             var ph = g / (groups.length * n);                            // 每组相位微错开, 避免完全重合
-            for (var i = 0; i < n; i++) {
-                var th = (i + ph) * (2 * Math.PI / n);
-                var d0 = cfg.linePx / (2 * r0), d1 = cfg.linePx / (2 * Rg);
-                polys.push([
-                    [cx + r0 * Math.cos(th - d0), cy + r0 * Math.sin(th - d0)],
-                    [cx + Rg * Math.cos(th - d1), cy + Rg * Math.sin(th - d1)],
-                    [cx + Rg * Math.cos(th + d1), cy + Rg * Math.sin(th + d1)],
-                    [cx + r0 * Math.cos(th + d0), cy + r0 * Math.sin(th + d0)]
-                ]);
+            /* 一层射线: 条数 m, 半径区间 [rIn, rOut], 角度取上一层的相邻两条中间(2^k 间隔) */
+            function pushFan(k, m, rIn, rOut) {
+                if (m < 1 || rOut <= rIn) return;
+                var span = Math.pow(2, k), off = (span - 1) / 2;
+                for (var j = 0; j < m; j++) {
+                    var th = (j * span + off + ph) * step;
+                    var d0 = cfg.linePx / (2 * rIn), d1 = cfg.linePx / (2 * rOut);
+                    polys.push([
+                        [cx + rIn * Math.cos(th - d0), cy + rIn * Math.sin(th - d0)],
+                        [cx + rOut * Math.cos(th - d1), cy + rOut * Math.sin(th - d1)],
+                        [cx + rOut * Math.cos(th + d1), cy + rOut * Math.sin(th + d1)],
+                        [cx + rIn * Math.cos(th + d0), cy + rIn * Math.sin(th + d0)]
+                    ]);
+                }
+            }
+            pushFan(0, n, r0, Rg);                                       // 外层: n 条, r0 → 区域外缘
+            if (autoInner) {
+                var rHi = r0, m = Math.floor(n / 2), k = 1;
+                while (m >= 3 && k < 12) {
+                    var rLo = Math.max(rHi / 2, cfg.linePx * 1.5);
+                    pushFan(k, m, rLo, rHi);
+                    if (rLo <= cfg.linePx * 1.5) break;
+                    rHi = rLo; m = Math.floor(m / 2); k++;
+                }
             }
         }
         return polys;
@@ -1313,23 +1371,28 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
         return polys;
     }
     function genCarbon(b, cfg) {
-        // 网格步距 = 纤维长 + 基准间距(旧版步距 = wavelength = 12mm, 纤维只有 2mm, 中间空一大片)
+        // Short diagonal fibres: the old square grid used dash length as row spacing,
+        // leaving large empty bands. Pack rows by physical line width + net gap.
         var pitch = cfg.linePx + cfg.gapMidPx;
-        var L = cfg.segLenPx || (pitch * 4);
-        var cell = Math.max(L + pitch, unitCellPx(cfg, 2, 4));
+        var L = Math.min(cfg.segLenPx || pitch * 4, pitch * 4);
+        var cell = L + cfg.gapMidPx;
+        var p = projections(b, withDir(cfg, cfg.dirRad + Math.PI / 4));
         var polys = [], row = 0;
-        var dx = Math.cos(cfg.dirRad) * L, dy = Math.sin(cfg.dirRad) * L;
-        for (var y = b.y0; y < b.y1; y += cell) {
-            var off = (row % 2) * cell / 2;
-            for (var x = b.x0 + off; x < b.x1; x += cell) { var rb = ribbon2(x, y, x + dx, y + dy, cfg.linePx / 2); if (rb) polys.push(rb); }
+        for (var ss = p.smin; ss <= p.smax; ss += pitch) {
+            var phase = (row % 2) * cell / 2;
+            for (var t = p.tmin - cell + phase; t < p.tmax; t += cell) {
+                var x = p.cx + t * p.dx + ss * p.nx, y = p.cy + t * p.dy + ss * p.ny;
+                var rb = ribbon2(x, y, x + L * p.dx, y + L * p.dy, cfg.linePx / 2);
+                if (rb) polys.push(rb);
+            }
             row++;
         }
         return polys;
     }
     function genScale(b, cfg) {
-        // 单元 = 基准间距的 2~4 倍(旧版 12mm, 鳞片半径 5.4mm, 与其它纹样差一个数量级)
-        var cell = unitCellPx(cfg, 2, 4), half = cfg.linePx / 2, polys = [], row = 0;
-        for (var y = b.y0; y < b.y1; y += cell * 0.75) {
+        // Smaller overlapping scales keep the rows visually continuous.
+        var cell = unitCellPx(cfg, 2, 3), half = cfg.linePx / 2, polys = [], row = 0;
+        for (var y = b.y0; y < b.y1; y += cell * 0.65) {
             var off = (row % 2) * cell / 2;
             for (var x = b.x0 + off; x < b.x1; x += cell) {
                 var pts = [];
@@ -1341,15 +1404,18 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
         return polys;
     }
     function genDash(b, cfg) {
-        var p = projections(b, cfg), dash = cfg.segLenPx || 12, gap = cfg.gapSparsePx, polys = [], ss = p.smin;
+        var p = projections(b, cfg), dash = cfg.segLenPx || 12, gap = cfg.gapMidPx;
+        var cell = dash + gap, polys = [], ss = p.smin, row = 0;
         while (ss <= p.smax) {
             var px = p.cx + ss * p.nx, py = p.cy + ss * p.ny, g = gapFor(b, cfg, px, py);
-            for (var t = p.tmin; t < p.tmax; t += dash + gap) {
+            var phase = (row % 2) * cell / 2;
+            for (var t = p.tmin - cell + phase; t < p.tmax; t += cell) {
                 var e = Math.min(t + dash, p.tmax);
                 var rb = ribbon2(px + t * p.dx, py + t * p.dy, px + e * p.dx, py + e * p.dy, cfg.linePx / 2);
                 if (rb) polys.push(rb);
             }
             ss += cfg.linePx + g;
+            row++;
         }
         return polys;
     }
@@ -1357,9 +1423,9 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
         /* 点阵: 网格步距 = 基准间距的 2~4 倍(旧版 = wavelength = 12mm);
          * 点半径按网格与净隙自动收敛, 保证相邻点之间留出净距。 */
         var pitch = cfg.linePx + cfg.gapMidPx;
-        var cell = unitCellPx(cfg, 2, 4);
+        var cell = unitCellPx(cfg, 2, 3);
         var r = cfg.ampPx || cfg.linePx * 3;
-        var rMax = (cell - pitch) / 2 - cfg.linePx / 2;   // 扣掉线宽半宽, 保证相邻点之间留出净距
+        var rMax = (cell - cfg.gapMidPx) / 2 - cfg.linePx / 2;   // 相邻点外轮廓保留中隙
         if (rMax < cfg.linePx / 2) rMax = cfg.linePx / 2;
         if (r > rMax) r = rMax;
         if (r < cfg.linePx / 2) r = cfg.linePx / 2;
@@ -1387,6 +1453,83 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
             j = i;
         }
         return inside;
+    }
+    /* ---------------- 区域裁剪: 只保留真正落在区域里的纹样 ----------------
+     * 001 实测: 失败的大层都是"大 bbox + 稀疏内容"——图层13 的 bbox 是 1666x770, 但不透明像素
+     * 只占 7.8%, 图层48 只有 1.6%。纹样是按 bbox 生成的, 于是十几倍的线都落在区域外, 既撞安全
+     * 预算又白建形状层(蒙版本来也会把它们裁掉)。这里按区域子路径建粗网格索引, 用偶数交叉规则
+     * 判断"这个点是否在区域内"(孔洞天然算对), 沿多边形轮廓取样, 一条都不在区域内的就丢掉。
+     * 结果与蒙版裁切后的成品一致; contour/topographic 这类本来就贴着区域轮廓生成的纹样不筛。 */
+    function buildRegionIndex(subs, cellPx) {
+        var bb = subsBBox(subs);
+        if (!bb) return null;
+        var cell = Math.max(cellPx || 64, 1);
+        var cols = Math.max(1, Math.ceil((bb[2] - bb[0]) / cell) + 1);
+        var rows = Math.max(1, Math.ceil((bb[3] - bb[1]) / cell) + 1);
+        var polys = [], boxes = [];
+        for (var i = 0; i < subs.length; i++) {
+            var pts = subs[i].entireSubPath, poly = [];
+            for (var j = 0; j < pts.length; j++) poly.push([pts[j].anchor[0], pts[j].anchor[1]]);
+            if (poly.length < 3) continue;
+            var x0 = 1e18, y0 = 1e18, x1 = -1e18, y1 = -1e18;
+            for (j = 0; j < poly.length; j++) {
+                if (poly[j][0] < x0) x0 = poly[j][0]; if (poly[j][0] > x1) x1 = poly[j][0];
+                if (poly[j][1] < y0) y0 = poly[j][1]; if (poly[j][1] > y1) y1 = poly[j][1];
+            }
+            polys.push(poly); boxes.push([x0, y0, x1, y1]);
+        }
+        if (!polys.length) return null;
+        var grid = [];
+        for (i = 0; i < cols * rows; i++) grid.push(null);
+        for (i = 0; i < polys.length; i++) {
+            var bx = boxes[i];
+            var c0 = Math.max(0, Math.floor((bx[0] - bb[0]) / cell)), c1 = Math.min(cols - 1, Math.floor((bx[2] - bb[0]) / cell));
+            var r0 = Math.max(0, Math.floor((bx[1] - bb[1]) / cell)), r1 = Math.min(rows - 1, Math.floor((bx[3] - bb[1]) / cell));
+            for (var r = r0; r <= r1; r++) for (var c2 = c0; c2 <= c1; c2++) {
+                var gi = r * cols + c2;
+                if (!grid[gi]) grid[gi] = [];
+                grid[gi].push(i);
+            }
+        }
+        return { bb: bb, cell: cell, cols: cols, rows: rows, polys: polys, boxes: boxes, grid: grid };
+    }
+    function pointInRegion(ix, x, y) {
+        if (!ix) return true;
+        if (x < ix.bb[0] || x > ix.bb[2] || y < ix.bb[1] || y > ix.bb[3]) return false;
+        var c = Math.floor((x - ix.bb[0]) / ix.cell), r = Math.floor((y - ix.bb[1]) / ix.cell);
+        if (c < 0) c = 0; if (c >= ix.cols) c = ix.cols - 1;
+        if (r < 0) r = 0; if (r >= ix.rows) r = ix.rows - 1;
+        var list = ix.grid[r * ix.cols + c];
+        if (!list) return false;
+        var inside = false;
+        for (var k = 0; k < list.length; k++) {
+            var pi = list[k], poly = ix.polys[pi], bx = ix.boxes[pi];
+            if (x < bx[0] || x > bx[2] || y < bx[1] || y > bx[3]) continue;
+            if (pointInPoly([x, y], poly)) inside = !inside;   // 偶数交叉: 孔洞自然挖掉
+        }
+        return inside;
+    }
+    function filterPolysToRegion(polys, subs, stepPx) {
+        var ix = buildRegionIndex(subs, 64);
+        if (!ix) return { polys: polys, dropped: 0 };
+        var step = Math.max(stepPx || 6, 2), out = [], dropped = 0;
+        for (var i = 0; i < polys.length; i++) {
+            var p = polys[i];
+            if (!p || p.length < 3) { dropped++; continue; }
+            var keep = false;
+            for (var j = 0; j < p.length && !keep; j++) {
+                var a = p[j], b2 = p[(j + 1) % p.length];
+                var dx = b2[0] - a[0], dy = b2[1] - a[1];
+                var len = Math.sqrt(dx * dx + dy * dy);
+                var nSeg = Math.max(1, Math.ceil(len / step));
+                for (var s = 0; s <= nSeg; s++) {
+                    var t = s / nSeg;
+                    if (pointInRegion(ix, a[0] + dx * t, a[1] + dy * t)) { keep = true; break; }
+                }
+            }
+            if (keep) out.push(p); else dropped++;
+        }
+        return { polys: out, dropped: dropped };
     }
     function resamplePoly(poly, spacing, maxPts) {
         var cap = maxPts || 2000;
@@ -1506,6 +1649,7 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
                 progressFile.close();
             } catch (e) {}
         }
+        plogImpl = plog;
 
         var stage = '准备';
         try {
@@ -1612,7 +1756,7 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
                 var hideOut = isNoRefraction(srcPath);
                 if (!enabled) { log('SKIP ' + srcPath); continue; }
 
-                var layer = resolveLayer(src, String(srcPath).split('/'), 0);
+                var layer = (L.source_id ? findLayerById(src, L.source_id) : null) || resolveLayer(src, String(srcPath).split('/'), 0);
                 if (!layer) { log('MISSING 未找到图层: ' + srcPath); continue; }
 
                 /* ---- 单层处理开始: 任何一层出错只跳过该层, 不中断整次生成 ---- */
@@ -1641,8 +1785,7 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
                     denseEnd: L.dense_end || dflt.dense_end || 'bottom',
                     branchAngleRad: num(L.branch_angle_deg, num(dflt.branch_angle_deg, 45)) * Math.PI / 180,
                     fanArcRad: num(L.fan_arc_deg, num(dflt.fan_arc_deg, 120)) * Math.PI / 180,
-                    sectorCount: Math.max(2, Math.round(num(L.sector_count, num(dflt.sector_count, 8)))),
-                    petalCount: Math.max(2, Math.round(num(L.petal_count, num(dflt.petal_count, 6)))),
+                    petalCount: Math.max(2, Math.round(num(L.petal_count, num(dflt.petal_count, 14)))),
                     cxPx: resolveCoord(L.center_x, wpx, scale),
                     cyPx: resolveCoord(L.center_y, hpx, scale),
                     innerRadiusPx: num(L.inner_radius_mm, num(dflt.inner_radius_mm, 0)) * scale
@@ -1672,7 +1815,11 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
                     var tBool = new Date().getTime(), regPathB = null;
                     try {
                         if (subs.length > MAX_SUBPATHS) plog('区域路径按面积截断(相减用): ' + subs.length + ' -> ' + MAX_SUBPATHS + ' 条子路径');
+                        /* 这几步在大区域上可能各要几十秒到几分钟; 每步前后各写一行日志,
+                         * 万一卡住(003 在 PS 25.11 上停过一次)能一眼看出停在哪一步。 */
+                        plog('扣除步骤: 建相减路径(' + Math.min(subs.length, MAX_SUBPATHS) + ' 条子路径)...');
                         regPathB = master.pathItems.add('ZG_temp_bool_' + String(new Date().getTime()), subsPxToPt(master, limitSubs(subs)));
+                        plog('扣除步骤: 建路径完成; 转选区并扣除已生成区域...');
                         regPathB.makeSelection();
                         master.selection.load(usedCh, SelectionType.DIMINISH);
                         var kept = true;
@@ -1686,7 +1833,9 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
                             keepContainerForChildren(srcPath, hideOut, L);
                             continue;
                         }
+                        plog('扣除步骤: 选区相减完成; 转工作路径...');
                         master.selection.makeWorkPath(Math.max(tolPx, 2.0));   // 蒙版是裁切边界, 用较粗容差显著减少碎片与耗时
+                        plog('扣除步骤: 工作路径完成; 读回锚点...');
                         var clippedSubs = readWorkPathFast(master);
                         if (clippedSubs && clippedSubs.length) maskSubs = clippedSubs;
                         try { master.selection.deselect(); } catch (eD1) {}
@@ -1723,6 +1872,16 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
                 if (mbSim && mbSim[2] > mbSim[0] && mbSim[3] > mbSim[1]) b = { x0: mbSim[0], y0: mbSim[1], x1: mbSim[2], y1: mbSim[3] };
                 plog('bbox ' + b.x0 + ',' + b.y0 + '..' + b.x1 + ',' + b.y1 + ' linePx=' + cfg.linePx + ' gapMid=' + cfg.gapMidPx + ' gapSparse=' + cfg.gapSparsePx + ' dirRad=' + cfg.dirRad);
 
+                /* 剩余区域比两条线还窄(被先做的层扣到只剩几像素的缝)时, 生成出来全是退化几何,
+                 * 还会让 PS 在挂组蒙版/并入通道时卡死或报错(001 子树实测: 图层 4 卡 15 分钟后失败) —— 直接按覆盖跳过。 */
+                if (Math.max(b.x1 - b.x0, b.y1 - b.y0) < cfg.linePx * 2) {
+                    covered++;
+                    plog('COVERED 剩余区域过小(' + Math.round(b.x1 - b.x0) + 'x' + Math.round(b.y1 - b.y0) + 'px < 2 线宽), 跳过本层纹样: ' + srcPath);
+                    log('COVERED 剩余区域过小, 跳过: ' + srcPath);
+                    keepContainerForChildren(srcPath, hideOut, L);
+                    continue;
+                }
+
                 var polys;
                 stage = '生成纹样: ' + srcPath;
                 if (pattern === 'parallel' || pattern === 'facet') polys = genFacet(b, cfg);
@@ -1735,13 +1894,9 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
                 else if (pattern === 'bilateral_flow') polys = genBilateral(b, cfg);
                 else if (pattern === 'meander') polys = genMeander(b, cfg);
                 else if (pattern === 'contour' || pattern === 'topographic') polys = genContour(maskSubs, cfg);
-                else if (pattern === 'radial') polys = genRadial(b, cfg);
                 else if (pattern === 'fan') polys = genFan(b, cfg);
-                else if (pattern === 'cone') polys = genCone(b, cfg);
-                else if (pattern === 'sunburst') polys = genSunburst(b, cfg);
                 else if (pattern === 'concentric') polys = genConcentric(b, cfg);
                 else if (pattern === 'ripple') polys = genRipple(b, cfg);
-                else if (pattern === 'spiral') polys = genSpiral(b, cfg);
                 else if (pattern === 'vortex') polys = genVortex(b, cfg);
                 else if (pattern === 'petal_rosette') polys = genPetal(b, cfg);
                 else if (pattern === 'diamond_lattice') polys = genDiamond(b, cfg);
@@ -1761,6 +1916,15 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
 
                 polys = normalizePolys(polys);   // 压到 Photoshop 单子路径 1000 点上限内
                 if (!polys.length) { log('NOLINES 区域过小未产生线, 跳过: ' + srcPath); continue; }
+
+                /* 只保留真正落在区域里的纹样(大 bbox + 稀疏内容时能省掉十几倍无用几何)。
+                 * contour/topographic 本来就贴着区域轮廓生成, 跳过筛选避免误删。 */
+                if (pattern !== 'contour' && pattern !== 'topographic') {
+                    var filt = filterPolysToRegion(polys, maskSubs, cfg.linePx);
+                    if (filt.dropped) plog('区域裁剪: 纹样 ' + polys.length + ' -> ' + filt.polys.length + ' (丢掉区域外的 ' + filt.dropped + ' 条)');
+                    polys = filt.polys;
+                    if (!polys.length) { log('NOLINES 区域过小未产生线, 跳过: ' + srcPath); continue; }
+                }
 
                 var plan = planShapeBatches(polys);
                 plog('纹样完成: 多边形 ' + polys.length + ' 节点 ' + plan.points);
@@ -1821,19 +1985,32 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
                         regPath = master.pathItems.add('ZG_temp_region_' + String(new Date().getTime()), subsPxToPt(master, limitSubs(maskSubs)));
                         plog('已加区域路径, 挂组蒙版...');
                         applyVectorMask(master, shapeHost, regPath);
+                        plog('组蒙版: 矢量蒙版已建立; 并入已生成区域...');
                         if (noOverlap && ensureUsedChannel()) {
-                            // 把本层实际占用的区域并入"已生成区域"("不折光"层同样占用, 见上方说明)
-                            regPath.makeSelection();
-                            try { master.selection.store(usedCh, SelectionType.EXTEND); }
-                            catch (eSt) {   // 少数版本不支持带类型的 store, 退回 载入+存储
-                                master.selection.load(usedCh, SelectionType.EXTEND);
-                                master.selection.store(usedCh);
+                            /* 把本层实际占用的区域并入"已生成区域"("不折光"层同样占用, 见上方说明)。
+                             * 这一步只影响后续层的扣除, 失败不该毁掉本层已挂好的蒙版: 记警告继续。 */
+                            try {
+                                regPath.makeSelection();
+                                var selOK = true;
+                                try { master.selection.bounds; } catch (eSelEmpty) { selOK = false; }
+                                if (selOK) {
+                                    try { master.selection.store(usedCh, SelectionType.EXTEND); }
+                                    catch (eSt) {   // 少数版本不支持带类型的 store, 退回 载入+存储
+                                        master.selection.load(usedCh, SelectionType.EXTEND);
+                                        master.selection.store(usedCh);
+                                    }
+                                    var mb1 = subsBBox(maskSubs);
+                                    if (mb1) usedBox = usedBox
+                                        ? { x0: Math.min(usedBox.x0, mb1[0]), y0: Math.min(usedBox.y0, mb1[1]), x1: Math.max(usedBox.x1, mb1[2]), y1: Math.max(usedBox.y1, mb1[3]) }
+                                        : { x0: mb1[0], y0: mb1[1], x1: mb1[2], y1: mb1[3] };
+                                } else {
+                                    plog('警告: 区域选区为空, 未并入占用通道(不影响本层输出): ' + srcPath);
+                                }
+                                try { master.selection.deselect(); } catch (eD3) {}
+                            } catch (eUsed) {
+                                try { master.selection.deselect(); } catch (eD5) {}
+                                plog('警告: 并入占用通道失败(不影响本层输出): ' + (eUsed && eUsed.message ? eUsed.message : String(eUsed)));
                             }
-                            try { master.selection.deselect(); } catch (eD3) {}
-                            var mb1 = subsBBox(maskSubs);
-                            if (mb1) usedBox = usedBox
-                                ? { x0: Math.min(usedBox.x0, mb1[0]), y0: Math.min(usedBox.y0, mb1[1]), x1: Math.max(usedBox.x1, mb1[2]), y1: Math.max(usedBox.y1, mb1[3]) }
-                                : { x0: mb1[0], y0: mb1[1], x1: mb1[2], y1: mb1[3] };
                         }
                         regPath.remove();
                         regPath = null;
@@ -1857,6 +2034,8 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
                     plog('失败(已跳过该层): ' + srcPath + ' | ' + lmsg);
                     log('FAIL ' + srcPath + ' | ' + lmsg);
                     failed.push(srcPath + ' | ' + lmsg);
+                    /* 组已删除: 清掉登记, 否则后面的嵌套/空组清理会引用失效对象, 把整次生成带崩(001 子树实测) */
+                    delete groupByPath[srcPath];
                     try { if (group) group.remove(); } catch (e4) {}
                     try { app.activeDocument = master; } catch (e5) {}
                     continue;
@@ -1873,8 +2052,13 @@ var ZG_CORE_VERSION = '2026-09-17b';   // 便于在 zg_progress.txt 里确认实
                 if (!npGroup) continue;
                 var parentG = nearestAncestorGroup(npPath);
                 if (parentG && parentG !== npGroup) {
-                    if (nestGroup(master, npGroup, parentG) > 0) { nested++; if (!nestMethodSeen) nestMethodSeen = nestMethodUsed; }
-                    else { nestFail++; plog('警告: 组嵌套失败 ' + npPath); }
+                    try {
+                        if (nestGroup(master, npGroup, parentG) > 0) { nested++; if (!nestMethodSeen) nestMethodSeen = nestMethodUsed; }
+                        else { nestFail++; plog('警告: 组嵌套失败 ' + npPath); }
+                    } catch (eNest) {
+                        nestFail++;
+                        plog('警告: 组嵌套异常 ' + npPath + ' | ' + (eNest && eNest.message ? eNest.message : String(eNest)));
+                    }
                 }
             }
             // 嵌套后仍为空的容器组: 子层嵌套失败时会留下空组, 结构校验会判「空输出组」, 这里先清掉

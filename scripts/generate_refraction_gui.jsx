@@ -22,17 +22,17 @@
         return f.exists ? f : null;
     }
 
-    var PATTERNS = ['parallel', 'facet', 'flow', 'wave', 'zigzag', 'chevron', 'feather', 'herringbone', 'bilateral_flow', 'meander', 'contour', 'topographic', 'radial', 'fan', 'cone', 'sunburst', 'concentric', 'ripple', 'spiral', 'vortex', 'petal_rosette', 'diamond_lattice', 'diamond_tri', 'moire_radial', 'triangle_lattice', 'hex_lattice', 'checker', 'carbon_fiber', 'scale', 'dash_field', 'dot_field', 'short_curve'];
+    var PATTERNS = ['parallel', 'facet', 'flow', 'wave', 'zigzag', 'chevron', 'feather', 'herringbone', 'bilateral_flow', 'meander', 'contour', 'topographic', 'fan', 'concentric', 'ripple', 'vortex', 'petal_rosette', 'diamond_lattice', 'diamond_tri', 'moire_radial', 'triangle_lattice', 'hex_lattice', 'checker', 'carbon_fiber', 'scale', 'dash_field', 'dot_field', 'short_curve'];
     /* 纹样键 -> 中文名(取自 references/design-logic.md 的定稿命名)。下拉菜单显示中文, 内部仍用键名传参。 */
     var PATTERN_LABELS = {
         parallel: '单向平行纹', facet: '折面平行纹', flow: '顺势流线', wave: '平行波纹', zigzag: '连续折线纹',
         chevron: '鱼骨纹', feather: '羽片纹', herringbone: '人字错列纹', bilateral_flow: '双向流线',
-        meander: '回纹', contour: '等距轮廓纹', topographic: '地形等高纹', radial: '放射纹', fan: '扇形纹',
-        cone: '锥形束纹', sunburst: '分区爆发纹', concentric: '同心纹', ripple: '涟漪纹', spiral: '螺旋纹',
+        meander: '回纹', contour: '等距轮廓纹', topographic: '地形等高纹', fan: '扇形纹',
+        concentric: '同心纹', ripple: '涟漪纹',
         vortex: '涡旋流场', petal_rosette: '花瓣玫瑰纹', diamond_lattice: '菱形网格', diamond_tri: '三角菱格纹',
         moire_radial: '辐射摩尔纹', triangle_lattice: '三角网格',
         hex_lattice: '六角蜂巢纹', checker: '棋盘方向纹', carbon_fiber: '碳纤维纹', scale: '鳞片纹',
-        dash_field: '错相短线场', dot_field: '点阵纹', short_curve: '稀疏短曲线'
+        dash_field: '错相短线场', dot_field: '点阵纹', short_curve: '稠密短曲线'
     };
     function patternLabel(key) { return PATTERN_LABELS[key] || String(key); }
     function patternLabelList() {
@@ -75,14 +75,14 @@
         var dlg = new Window('dialog', '折光纹工具箱 · 生成折光纹（手动分配）');
         dlg.orientation = 'column';
         dlg.alignChildren = 'left';
-        dlg.preferredSize.width = 680;
+        dlg.preferredSize.width = 950;
 
         dlg.add('statictext', undefined, '源: ' + src.name + '   Photoshop ' + app.version + '  (共 ' + infos.length + ' 层; 最小线宽固定 ' + MIN_LINE_MM + ' mm)');
 
         // ---- 图层列表 ----
         dlg.add('statictext', undefined, '图层分配（点选一行编辑；列表即生成顺序：子层优先，组容器排在其子层之后；隐藏层、整图合成层和明确排除层默认不生成）');
         var lb = dlg.add('listbox', undefined, undefined);
-        lb.preferredSize.width = 660; lb.preferredSize.height = 150;
+        lb.preferredSize.width = 916; lb.preferredSize.height = 150;
 
         function rowText(idx) {
             return (asg[idx].enabled ? '[启用]' : '[跳过]') + '  ' + patternLabel(asg[idx].pattern) + '(' + asg[idx].pattern + ')  ' + infos[idx].path + (infos[idx].visible ? '' : '  (隐藏)');
@@ -96,8 +96,9 @@
             refreshingList = false;
         }
 
-        // ---- 参数面板 (紧凑多列布局) ----
-        var p = dlg.add('panel', undefined, '当前图层参数');
+        // ---- 参数与纹样预览并排显示 ----
+        var body = dlg.add('group'); body.orientation = 'row'; body.alignChildren = ['left', 'top'];
+        var p = body.add('panel', undefined, '当前图层参数');
         p.orientation = 'column';
         p.alignChildren = 'left';
 
@@ -141,6 +142,37 @@
         var r4 = p.add('group'); r4.orientation = 'row'; r4.alignChildren = 'left';
         var eExtra = fld2(r4, '高级参数', '', 34);
 
+        var previewPanel = body.add('panel', undefined, '纹样预览');
+        previewPanel.orientation = 'column'; previewPanel.alignChildren = 'left';
+        previewPanel.preferredSize.width = 214;
+        var previewFolder = new Folder(new Folder(scriptDir).parent.fsName + '/texture-preview');
+        function previewFile(key) {
+            return new File(previewFolder.fsName + '/' + patternLabel(key) + '-' + key + '.png');
+        }
+        var initialPreviewFile = previewFile(DEFAULT_PATTERN);
+        var previewImage = previewPanel.add('image', undefined, initialPreviewFile.exists ? initialPreviewFile : undefined);
+        previewImage.preferredSize = [188, 188];
+        // The source PNG is 256x256; drawImage fits it into the smaller viewport.
+        previewImage.onDraw = function () {
+            if (this.image) this.graphics.drawImage(this.image, 0, 0, this.size.width, this.size.height);
+        };
+        var previewName = previewPanel.add('statictext', undefined, '');
+        var previewKey = previewPanel.add('statictext', undefined, '');
+        var previewNote = previewPanel.add('statictext', undefined, '示意图；参数不实时重绘');
+        function updatePreview(key) {
+            var file = previewFile(key);
+            previewName.text = patternLabel(key);
+            previewKey.text = key;
+            try {
+                previewImage.image = file.exists ? file : null;
+                previewNote.text = file.exists ? '示意图；参数不实时重绘' : '缺少预览图：texture-preview';
+            } catch (e) {
+                previewImage.image = null;
+                previewNote.text = '预览图读取失败';
+            }
+            if (dlg.visible) dlg.update();
+        }
+
         // ---- 编辑逻辑 ----
         function selectedIndex() { return lb.selection ? lb.selection.index : -1; }
         function patIndex(name) { for (var m = 0; m < PATTERNS.length; m++) if (PATTERNS[m] === name) return m; return 0; }
@@ -154,6 +186,7 @@
             eLine.text = a.line_mm; eDir.text = a.direction_deg; eAmp.text = a.amplitude_mm; eWave.text = a.wavelength_mm;
             eDense.text = a.gap_dense_mm; eMid.text = a.gap_mid_mm; eSparse.text = a.gap_sparse_mm; eSeg.text = a.segment_length_mm;
             eTol.text = a.path_tolerance_px; eCx.text = a.center_x; eCy.text = a.center_y; eInner.text = a.inner_radius_mm; eExtra.text = a.extra;
+            updatePreview(a.pattern);
             updateHint(idx);
         }
         function fieldsToAssign(idx) {
@@ -166,6 +199,7 @@
             updateHint(idx);
         }
         var editingIndex = -1, refreshingList = false;
+        dd.onChange = function () { updatePreview(selectedPatternKey()); };
         lb.onChange = function () {
             if (refreshingList) return;
             var k = selectedIndex();
@@ -237,7 +271,7 @@
             var layers = [];
             for (var n = 0; n < infos.length; n++) {
                 var a = asg[n];
-                var entry = { source_path: infos[n].path, enabled: a.enabled, pattern: a.pattern };
+                var entry = { source_path: infos[n].path, source_id: infos[n].id, enabled: a.enabled, pattern: a.pattern };
                 var map = { line_mm: a.line_mm, gap_dense_mm: a.gap_dense_mm, gap_mid_mm: a.gap_mid_mm, gap_sparse_mm: a.gap_sparse_mm, direction_deg: a.direction_deg, amplitude_mm: a.amplitude_mm, wavelength_mm: a.wavelength_mm, segment_length_mm: a.segment_length_mm, inner_radius_mm: a.inner_radius_mm, center_x: a.center_x, center_y: a.center_y, path_tolerance_px: a.path_tolerance_px };
                 for (var k in map) { var v = parseNum(map[k]); if (v !== null) entry[k] = v; }
                 if (a.extra) {

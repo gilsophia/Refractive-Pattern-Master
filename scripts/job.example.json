@@ -13,7 +13,7 @@
   "layers": [
     { "source_path": "人物/头发", "enabled": true, "pattern": "flow", "direction_deg": 0, "amplitude_mm": 0.9, "wavelength_mm": 12, "gradient_axis": "vertical", "dense_end": "bottom" },
     { "source_path": "人物/脸", "enabled": false },
-    { "source_path": "背景", "enabled": true, "pattern": "radial", "center_x": 0.5, "center_y": 0.4, "inner_radius_mm": 8 },
+    { "source_path": "背景", "enabled": true, "pattern": "fan", "center_x": 0.5, "center_y": 0.4, "inner_radius_mm": 8 },
     { "source_path": "飘带", "enabled": true, "pattern": "chevron", "direction_deg": 90, "amplitude_mm": 0.5, "wavelength_mm": 6 },
     { "source_path": "云", "enabled": true, "pattern": "contour" }
   ]
