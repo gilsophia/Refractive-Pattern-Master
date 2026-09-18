@@ -22,10 +22,10 @@
         return f.exists ? f : null;
     }
 
-    var PATTERNS = ['parallel', 'facet', 'flow', 'wave', 'zigzag', 'chevron', 'feather', 'herringbone', 'bilateral_flow', 'meander', 'contour', 'topographic', 'fan', 'concentric', 'ripple', 'vortex', 'petal_rosette', 'diamond_lattice', 'diamond_tri', 'moire_radial', 'triangle_lattice', 'hex_lattice', 'checker', 'carbon_fiber', 'scale', 'dash_field', 'dot_field', 'short_curve'];
+    var PATTERNS = ['parallel', 'facet', 'flow', 'content_flow', 'wave', 'zigzag', 'chevron', 'feather', 'herringbone', 'bilateral_flow', 'meander', 'contour', 'topographic', 'fan', 'concentric', 'ripple', 'vortex', 'petal_rosette', 'diamond_lattice', 'diamond_tri', 'moire_radial', 'triangle_lattice', 'hex_lattice', 'checker', 'carbon_fiber', 'scale', 'dash_field', 'dot_field', 'short_curve'];
     /* 纹样键 -> 中文名(取自 references/design-logic.md 的定稿命名)。下拉菜单显示中文, 内部仍用键名传参。 */
     var PATTERN_LABELS = {
-        parallel: '单向平行纹', facet: '折面平行纹', flow: '顺势流线', wave: '平行波纹', zigzag: '连续折线纹',
+        parallel: '单向平行纹', facet: '折面平行纹', flow: '顺势流线', content_flow: '随形流场', wave: '平行波纹', zigzag: '连续折线纹',
         chevron: '鱼骨纹', feather: '羽片纹', herringbone: '人字错列纹', bilateral_flow: '双向流线',
         meander: '回纹', contour: '等距轮廓纹', topographic: '地形等高纹', fan: '扇形纹',
         concentric: '同心纹', ripple: '涟漪纹',
@@ -65,10 +65,14 @@
 
         var asg = [];
         var i;
+        /* 一次性给出全部建议: 名字规则选候选集, 再按"相邻区块不同纹样/不同家族 + 全库用量轮换"定稿。 */
+        var initialSugg = ZG.suggestAll(infos, src.width.as('px'), src.height.as('px'));
         for (i = 0; i < infos.length; i++) {
             var a = copyDefaults();
-            var initialSuggestion = ZG.suggest(infos[i], src.width.as('px'), src.height.as('px'));
-            a.enabled = infos[i].visible && !initialSuggestion.skip; // 隐藏层、整图合成层和明确排除层默认不生成
+            var s0 = initialSugg[i];
+            a.pattern = s0.pattern;
+            a.direction_deg = String(s0.direction_deg);
+            a.enabled = infos[i].visible && !s0.skip; // 隐藏层、整图合成层和明确排除层默认不生成
             asg.push(a);
         }
 
@@ -117,6 +121,9 @@
         var noOverlapCb = r0.add('checkbox', undefined, '避免重复生成（子层优先）');
         noOverlapCb.value = true;
         noOverlapCb.helpTip = '按列表顺序生成时，每层只生成"尚未被先做的层占用"的部分，避免同一区域叠多套纹样变成实黑。列表为子层优先：细节纹样先占位，组容器与背景层只补空隙。';
+        var anCb = r0.add('checkbox', undefined, '读取画面内容');
+        anCb.value = true;
+        anCb.helpTip = '点"建议当前层/建议全部"时先分析画面（走向/一致度/弯折/径向/细节，每层约 1-2 秒），按内容修正纹样与方向；关闭则只用名称与几何规则（更快）。';
         r0.add('statictext', undefined, '   纹样:');
         var dd = r0.add('dropdownlist', undefined, patternLabelList());
         dd.selection = dd.items[0];
@@ -211,15 +218,45 @@
         var hint = dlg.add('statictext', undefined, '');
         function updateHint(k) {
             if (k < 0) { hint.text = ''; return; }
-            var s = ZG.suggest(infos[k], src.width.as('px'), src.height.as('px'));
-            hint.text = '建议: ' + (s.skip ? '[跳过] ' : '') + patternLabel(s.pattern) + '(' + s.pattern + ')' + (s.reason ? '  (' + s.reason + ')' : '');
+            var pats = [];
+            for (var n = 0; n < infos.length; n++) pats.push(asg[n].pattern);
+            var s = ZG.suggestFor(infos, src.width.as('px'), src.height.as('px'), k, pats);
+            hint.text = '建议: ' + (s.skip ? '[跳过] ' : '') + patternLabel(s.pattern) + '(' + s.pattern + ')' + (s.reason ? '  ' + s.reason : '');
+        }
+        var aReuse = {}, analysisCache = {};
+        /* 按需分析画面内容(结果按图层 id 缓存); 关闭勾选时返回 null。 */
+        function analysisOf(k) {
+            if (!anCb.value) return null;
+            var id = infos[k].id;
+            if (analysisCache[id] !== undefined) return analysisCache[id];
+            var an = ZG.analyzeLayer(src, infos[k].layer, aReuse);
+            analysisCache[id] = an;
+            return an;
         }
         function applySuggest(k) {
-            var s = ZG.suggest(infos[k], src.width.as('px'), src.height.as('px'));
+            infos[k].analysis = analysisOf(k);
+            var pats = [];
+            for (var n = 0; n < infos.length; n++) pats.push(asg[n].pattern);
+            var s = ZG.suggestFor(infos, src.width.as('px'), src.height.as('px'), k, pats);
             asg[k].pattern = s.pattern;
             asg[k].direction_deg = String(s.direction_deg);
             asg[k].enabled = !s.skip;
             return s;
+        }
+        function applySuggestAll() {
+            for (var k = 0; k < infos.length; k++) {
+                if (anCb.value) {
+                    hint.text = '读取画面内容 ' + (k + 1) + '/' + infos.length + ' …';
+                    try { dlg.update(); } catch (eU) {}
+                }
+                infos[k].analysis = analysisOf(k);
+            }
+            var sugg = ZG.suggestAll(infos, src.width.as('px'), src.height.as('px'));
+            for (var n = 0; n < infos.length; n++) {
+                asg[n].pattern = sugg[n].pattern;
+                asg[n].direction_deg = String(sugg[n].direction_deg);
+                asg[n].enabled = !sugg[n].skip;
+            }
         }
 
         // ---- 按钮 (紧凑两行) ----
@@ -229,7 +266,7 @@
         var bApply = gb1.add('button', undefined, '应用到当前层');
         var bApplyAll = gb1.add('button', undefined, '线宽/间隙应用到全部');
         bSuggest.onClick = function () { var k = selectedIndex(); if (k < 0) { alert('请先点选一个图层'); return; } applySuggest(k); loadIntoFields(k); refreshList(); };
-        bSuggestAll.onClick = function () { for (var n = 0; n < infos.length; n++) applySuggest(n); refreshList(); if (lb.items.length) { lb.selection = lb.items[0]; editingIndex = 0; loadIntoFields(0); } };
+        bSuggestAll.onClick = function () { applySuggestAll(); refreshList(); if (lb.items.length) { lb.selection = lb.items[0]; editingIndex = 0; loadIntoFields(0); } };
         bApply.onClick = function () { var k = selectedIndex(); if (k < 0) { alert('请先点选一个图层'); return; } fieldsToAssign(k); refreshList(); };
         bApplyAll.onClick = function () {
             var k = selectedIndex();
@@ -272,6 +309,7 @@
             for (var n = 0; n < infos.length; n++) {
                 var a = asg[n];
                 var entry = { source_path: infos[n].path, source_id: infos[n].id, enabled: a.enabled, pattern: a.pattern };
+                if (infos[n].analysis) entry.analysis = infos[n].analysis;
                 var map = { line_mm: a.line_mm, gap_dense_mm: a.gap_dense_mm, gap_mid_mm: a.gap_mid_mm, gap_sparse_mm: a.gap_sparse_mm, direction_deg: a.direction_deg, amplitude_mm: a.amplitude_mm, wavelength_mm: a.wavelength_mm, segment_length_mm: a.segment_length_mm, inner_radius_mm: a.inner_radius_mm, center_x: a.center_x, center_y: a.center_y, path_tolerance_px: a.path_tolerance_px };
                 for (var k in map) { var v = parseNum(map[k]); if (v !== null) entry[k] = v; }
                 if (a.extra) {
@@ -305,6 +343,8 @@
                 alert(msg);
             } catch (e) {
                 alert('生成出错:\n' + (e && e.message ? e.message : String(e)));
+            } finally {
+                if (aReuse.doc) { try { aReuse.doc.close(SaveOptions.DONOTSAVECHANGES); } catch (eAC) {} aReuse.doc = null; }
             }
         }
 

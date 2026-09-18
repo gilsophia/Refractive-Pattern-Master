@@ -630,11 +630,84 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
         return NO_REFRACTION_ASCII_RE.test(v);
     }
 
-    /* ---------------- 启发式建议 (本地规则) ---------------- */
-    function suggest(info, canvasW, canvasH) {
+    /* ---------------- 启发式建议 (本地规则 + 候选集 + 相邻差分) ----------------
+     * 每条名字规则给一个"候选集"(按适合度排序), 最终选哪一个由上下文决定:
+     *   ctx.used      = { pattern: 已用次数 }   → 同类候选里优先少用过的(全库轮换)
+     *   ctx.avoid     = { pattern: true }       → 相邻区域已用的, 优先排除
+     *   ctx.avoidFam  = { family: true }        → 相邻区域已用的家族, 次优先排除
+     * 这样既保留"名字→语义"的准确度, 又能让每种纹样都有机会被用上, 并且
+     * 相邻区块不撞同一种纹样(地图涂色式差分; 家族表把 parallel/facet 这类近亲算一家)。 */
+    var PATTERN_FAMILY = {
+        parallel: 'linear', facet: 'linear', dash_field: 'linear', carbon_fiber: 'linear',
+        zigzag: 'angular', chevron: 'angular', herringbone: 'angular', meander: 'angular', checker: 'angular',
+        diamond_lattice: 'lattice', diamond_tri: 'lattice', triangle_lattice: 'lattice', hex_lattice: 'lattice', scale: 'lattice',
+        flow: 'flow', content_flow: 'flow', bilateral_flow: 'flow', short_curve: 'flow',
+        wave: 'wave', ripple: 'wave',
+        fan: 'radial', concentric: 'radial', moire_radial: 'radial', petal_rosette: 'radial', vortex: 'radial',
+        contour: 'terrain', topographic: 'terrain',
+        dot_field: 'dots'
+    };
+    /* 名字规则表 (先命中先算). 每项: [正则, {skip/hide} 或 {cands:[...], why}] */
+    var SUGGEST_RULES = [
+        [/脸|face|皮肤|skin|五官|眼睛|眼|口|鼻|唇/i, { skip: true, why: '面部/五官 → 留白' }],
+        [/文字|标题|title|logo|签名|水印|text|字/i, { skip: true, why: '文字/签名 → 通常不加纹' }],
+        [/宝石|钻石|钻|水晶|晶石|玉|翡翠|玛瑙|珍珠|猫眼|gem|jewel|ruby|sapphire|emerald|opal|pearl|crystal/i, { cands: ['facet', 'fan', 'moire_radial', 'triangle_lattice', 'concentric'], why: '宝石/水晶' }],
+        [/头发|发丝|发束|毛发|hair/i, { cands: ['content_flow', 'flow', 'chevron', 'bilateral_flow', 'short_curve'], why: '头发' }],
+        [/云|cloud|烟|smoke|雾|气/i, { cands: ['contour', 'topographic', 'wave', 'vortex', 'short_curve'], why: '云/烟/雾' }],
+        [/水|波|浪|海|河|湖|water|wave/i, { cands: ['wave', 'ripple', 'content_flow', 'flow', 'topographic', 'dash_field'], why: '水/波' }],
+        [/印花|图案|花样|提花|print|pattern/i, { cands: ['diamond_lattice', 'checker', 'petal_rosette', 'meander', 'scale'], why: '印花/图案' }],
+        [/飘带|丝带|衣|布|裙|袖|袍|cloth|fabric|ribbon|带/i, { cands: ['content_flow', 'flow', 'bilateral_flow', 'wave', 'herringbone'], why: '织物/飘带' }],
+        [/羽|翅|翼|feather|wing/i, { cands: ['feather', 'chevron', 'bilateral_flow', 'scale'], why: '羽翼' }],
+        [/花|花瓣|flower|petal|玫瑰|rose/i, { cands: ['petal_rosette', 'contour', 'flow', 'short_curve'], why: '花卉' }],
+        [/光环|光晕|光芒|光线|放射|太阳|日轮|ray|sun|halo|星芒|radial/i, { cands: ['fan', 'moire_radial', 'concentric', 'petal_rosette'], why: '光环/太阳' }],
+        [/圆|币|coin|表盘|镜|盘|环|ring/i, { cands: ['concentric', 'petal_rosette', 'ripple', 'moire_radial'], why: '圆/盘/环' }],
+        [/边框|框|border|边饰|花边|frame|饰带|菱格|三角/i, { cands: ['diamond_tri', 'meander', 'diamond_lattice', 'dash_field', 'herringbone'], why: '边框/边饰' }],
+        [/回纹|迷宫|meander|希腊/i, { cands: ['meander', 'herringbone', 'diamond_tri'], why: '回纹' }],
+        [/鳞|鱼鳞|龙鳞|scale|甲/i, { cands: ['scale', 'hex_lattice', 'dot_field'], why: '鳞片' }],
+        [/涡|旋|漩涡|spiral|vortex|星云|galaxy/i, { cands: ['vortex', 'moire_radial', 'ripple', 'petal_rosette'], why: '漩涡/星云' }],
+        [/科技|机械|电路|机甲|装甲|蜂巢|honey|tech/i, { cands: ['hex_lattice', 'carbon_fiber', 'checker', 'triangle_lattice', 'dash_field'], why: '科技/机械' }],
+        [/金属|金饰|银|铜|铁|钢|珠宝|首饰|戒指|项链|盔甲|metal|gold|silver|iron/i, { cands: ['facet', 'parallel', 'dash_field', 'concentric', 'fan'], why: '金属' }],
+        [/石|建筑|墙|砖|building|城堡|岩石/i, { cands: ['facet', 'checker', 'parallel', 'triangle_lattice', 'topographic'], why: '建筑/岩石' }],
+        [/火|焰|燃烧|flame|fire/i, { cands: ['content_flow', 'flow', 'chevron', 'zigzag', 'vortex', 'wave'], why: '火焰' }],
+        [/闪电|雷|山形|zigzag/i, { cands: ['zigzag', 'chevron', 'facet'], why: '闪电/山形' }],
+        [/冰|雪|霜|ice|snow|frost/i, { cands: ['facet', 'triangle_lattice', 'diamond_lattice', 'hex_lattice'], why: '冰/雪' }],
+        [/木|竹|年轮|木纹|wood|bamboo/i, { cands: ['flow', 'topographic', 'wave', 'parallel'], why: '木/竹' }],
+        [/皮革|毛皮|绒|leather|fur/i, { cands: ['scale', 'short_curve', 'dot_field', 'carbon_fiber'], why: '皮革/毛皮' }],
+        [/纸|羊皮|书页|paper|parchment/i, { cands: ['topographic', 'short_curve', 'carbon_fiber', 'dash_field'], why: '纸/羊皮纸' }],
+        [/陶瓷|瓷|漆|釉|ceramic|porcelain|lacquer/i, { cands: ['concentric', 'petal_rosette', 'meander', 'diamond_tri'], why: '陶瓷/漆器' }],
+        [/蕾丝|纱|刺绣|lace|embroidery|tulle/i, { cands: ['meander', 'petal_rosette', 'diamond_lattice', 'short_curve'], why: '蕾丝/刺绣' }],
+        [/绳|结|辫|braid|rope|knot/i, { cands: ['flow', 'bilateral_flow', 'wave', 'concentric'], why: '绳结/编织' }],
+        [/魔法|法阵|符文|能量|magic|rune|energy/i, { cands: ['concentric', 'petal_rosette', 'ripple', 'vortex'], why: '魔法/能量' }],
+        [/地图|地形|山脉|山谷|沙漠|沙丘|map|terrain|dune|mountain/i, { cands: ['topographic', 'contour', 'facet', 'zigzag', 'dot_field'], why: '地图/地形' }],
+        [/沙|尘|颗粒|sand|dust/i, { cands: ['dot_field', 'carbon_fiber', 'dash_field', 'wave'], why: '沙/颗粒' }],
+        [/玻璃|镜面|反光|glass|mirror/i, { cands: ['diamond_lattice', 'parallel', 'fan', 'triangle_lattice'], why: '玻璃/反光' }],
+        [/装饰|花纹|元素|ornament|deco/i, { cands: ['short_curve', 'dot_field', 'petal_rosette', 'diamond_tri', 'dash_field'], why: '装饰元素' }],
+        [/阴影|暗部|shadow/i, { cands: ['short_curve', 'dash_field', 'parallel'], why: '阴影/暗部' }],
+        [/夜空|星空|星尘|starfield|starry|星/i, { cands: ['dot_field', 'moire_radial', 'vortex', 'dash_field'], why: '星空' }],
+        [/极光|aurora|光效|glow/i, { cands: ['moire_radial', 'vortex', 'wave', 'fan'], why: '极光/光效' }],
+        [/天空|sky/i, { cands: ['topographic', 'wave', 'parallel', 'dash_field'], why: '天空' }],
+        [/纺织|编织|格|棋盘|checker|weave|格子/i, { cands: ['herringbone', 'checker', 'diamond_lattice', 'carbon_fiber', 'meander'], why: '纺织/格子' }],
+        [/背景|底|background|bg|大面积/i, { cands: ['parallel', 'facet', 'wave', 'topographic', 'moire_radial', 'dash_field'], why: '背景/大面积' }]
+    ];
+    function pickCandidate(cands, ctx) {
+        var avoid = ctx && ctx.avoid, avoidFam = ctx && ctx.avoidFam, used = ctx && ctx.used;
+        var pool = [], i;
+        for (i = 0; i < cands.length; i++) if (!(avoid && avoid[cands[i]])) pool.push(cands[i]);
+        if (!pool.length) for (i = 0; i < cands.length; i++) pool.push(cands[i]);
+        var pool2 = [];
+        for (i = 0; i < pool.length; i++) if (!(avoidFam && avoidFam[PATTERN_FAMILY[pool[i]]])) pool2.push(pool[i]);
+        if (pool2.length) pool = pool2;
+        var best = pool[0], bestUse = used ? (used[best] || 0) : 0;
+        for (i = 1; i < pool.length; i++) {
+            var u = used ? (used[pool[i]] || 0) : 0;
+            if (u < bestUse) { best = pool[i]; bestUse = u; }
+        }
+        return best;
+    }
+    function suggest(info, canvasW, canvasH, ctx) {
         var name = String(info.name || '');
         var bd = info.bounds;
-        var r = { pattern: 'facet', direction_deg: 0, skip: false, hide: false, reason: '' };
+        var r = { pattern: 'facet', direction_deg: 0, skip: false, hide: false, reason: '', candidates: null };
         if (isNoRefraction(name)) { r.hide = true; r.reason = '名称含不折光标记 → 照常生成但输出组隐藏'; return r; }
         /* 调整层(色阶/曲线/颜色查找/色相饱和度等)没有自己的像素, 取样必为空, 默认跳过。 */
         var adjKinds = ['LEVELS', 'CURVES', 'COLORLOOKUP', 'HUESATURATION', 'BRIGHTNESSCONTRAST', 'VIBRANCE', 'EXPOSURE', 'COLORBALANCE', 'BLACKANDWHITE', 'PHOTOFILTER', 'CHANNELMIXER', 'INVERSION', 'POSTERIZE', 'THRESHOLD', 'SELECTIVECOLOR', 'GRADIENTMAP'];
@@ -642,50 +715,345 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
         for (var ak = 0; ak < adjKinds.length; ak++) {
             if (kindStr.indexOf(adjKinds[ak]) >= 0) { r.skip = true; r.reason = '调整层 → 无需生成纹样'; return r; }
         }
-        var table = [
-            [/脸|face|皮肤|skin|五官|眼睛|眼|口|鼻|唇|五官/i, { skip: true, why: '面部/五官 → 留白' }],
-            [/文字|标题|title|logo|签名|水印|text|字/i, { skip: true, why: '文字/签名 → 通常不加纹' }],
-            [/头发|发丝|发束|毛发|hair/i, { pattern: 'flow', why: '头发 → flow' }],
-            [/云|cloud|烟|smoke|雾|气/i, { pattern: 'contour', why: '云/烟 → contour' }],
-            [/水|波|浪|海|河|湖|water|wave|浪/i, { pattern: 'wave', why: '水 → wave' }],
-            [/飘带|丝带|衣|布|裙|袖|袍|cloth|fabric|ribbon|带/i, { pattern: 'flow', why: '织物/飘带 → flow' }],
-            [/羽|翅|翼|feather|wing/i, { pattern: 'feather', why: '羽翼 → feather' }],
-            [/花|花瓣|flower|petal|玫瑰|rose/i, { pattern: 'petal_rosette', why: '花卉 → petal_rosette' }],
-            [/光环|光晕|光芒|光线|放射|太阳|日轮|ray|sun|halo|星芒|radial/i, { pattern: 'fan', why: '光环/太阳 → 扇形纹' }],
-            [/圆|币|coin|表盘|镜|盘|环|ring/i, { pattern: 'concentric', why: '圆/盘 → concentric' }],
-            [/边框|框|border|边饰|花边|frame|饰带|菱格|三角/i, { pattern: 'diamond_tri', why: '边框/边饰 → 三角菱格纹' }],
-            [/回纹|迷宫|meander|希腊/i, { pattern: 'meander', why: '回纹 → meander' }],
-            [/鳞|鱼鳞|龙鳞|scale|甲/i, { pattern: 'scale', why: '鳞片 → scale' }],
-            [/涡|旋|漩涡|spiral|vortex|星云/i, { pattern: 'vortex', why: '漩涡 → 涡旋纹' }],
-            [/科技|机械|电路|机甲|装甲|蜂巢|honey|tech/i, { pattern: 'hex_lattice', why: '科技/机械 → hex_lattice' }],
-            [/石|建筑|墙|砖|building|城堡|岩石/i, { pattern: 'facet', why: '建筑/硬质 → facet' }],
-            [/背景|天空|底|background|bg|夜空|大面积/i, { pattern: 'moire_radial', why: '背景/大面积 → 辐射摩尔纹' }],
-            [/纺织|编织|格|棋盘|checker|weave|格子/i, { pattern: 'herringbone', why: '纺织/格 → herringbone' }]
-        ];
-        var matched = false;
-        for (var i = 0; i < table.length; i++) {
-            if (table[i][0].test(name)) { r.pattern = table[i][1].pattern || r.pattern; r.skip = !!table[i][1].skip; r.reason = table[i][1].why; matched = true; break; }
+        var cands = null, why = '', matched = false;
+        for (var i = 0; i < SUGGEST_RULES.length; i++) {
+            if (SUGGEST_RULES[i][0].test(name)) {
+                var rule = SUGGEST_RULES[i][1];
+                if (rule.skip) { r.skip = true; r.reason = rule.why; return r; }
+                cands = rule.cands; why = rule.why; matched = true; break;
+            }
         }
-        if (r.skip) return r;
         var w = 0, h = 0;
         if (bd && bd.length === 4) { w = toNum(bd[2]) - toNum(bd[0]); h = toNum(bd[3]) - toNum(bd[1]); }
-        if (w > 0 && h > 0) {
-            r.direction_deg = (w >= h) ? 0 : 90;
-            var aspect = Math.max(w, h) / Math.min(w, h);
-            var areaFrac = (w * h) / (canvasW * canvasH);
-            if (!matched && /NORMAL/i.test(String(info.kind || '')) && areaFrac > 0.95) {
-                r.skip = true; r.reason = '疑似整图合成/底图层 → 默认跳过'; return r;
-            }
+        var aspect = (w > 0 && h > 0) ? Math.max(w, h) / Math.min(w, h) : 1;
+        var areaFrac = (w > 0 && h > 0) ? (w * h) / (canvasW * canvasH) : 0;
+        if (!matched && /NORMAL/i.test(String(info.kind || '')) && areaFrac > 0.95) {
+            r.skip = true; r.reason = '疑似整图合成/底图层 → 默认跳过'; return r;
+        }
+        if (!cands) {
+            if (aspect > 3) { cands = ['flow', 'content_flow', 'chevron', 'bilateral_flow', 'wave', 'parallel']; why = '细长(长宽比 ' + aspect.toFixed(1) + ')'; }
+            else if (areaFrac < 0.03) { cands = ['short_curve', 'dash_field', 'dot_field', 'scale', 'concentric', 'petal_rosette', 'ripple', 'diamond_tri']; why = '小区域'; }
+            else if (areaFrac > 0.6) { cands = ['parallel', 'wave', 'topographic', 'moire_radial', 'facet', 'dash_field', 'contour', 'checker']; why = '大面积(占画布 ' + Math.round(areaFrac * 100) + '%)'; }
+            else { cands = ['parallel', 'facet', 'diamond_lattice', 'herringbone', 'checker', 'wave', 'zigzag', 'dash_field', 'carbon_fiber', 'meander']; why = '规则区域'; }
+        }
+        /* 画面证据(可选): 名字没命中时用内容特征选候选; 命中时只补充方向与理由。 */
+        var an = info.analysis;
+        if (an && an.ok) {
+            var ev = '画面走向 ' + Math.round(an.dirDeg) + '°(一致度 ' + an.coherence.toFixed(2) + ', 弯折 ' + an.curvature.toFixed(2) + ', 径向 ' + an.radial.toFixed(2) + ', 细节 ' + an.busy.toFixed(2) + ')';
             if (!matched) {
-                if (aspect > 3) { r.pattern = 'flow'; r.reason = '细长(长宽比 ' + aspect.toFixed(1) + ') → flow'; }
-                else if (areaFrac < 0.03) { r.pattern = 'short_curve'; r.reason = '小区域 → short_curve'; }
-                else if (areaFrac > 0.6) { r.pattern = 'moire_radial'; r.reason = '大面积(占画布 ' + Math.round(areaFrac * 100) + '%) → 辐射摩尔纹'; }
-                else { r.pattern = 'parallel'; r.reason = '规则区域 → parallel'; }
+                if (an.radial > 0.35) { cands = ['fan', 'moire_radial', 'petal_rosette', 'concentric', 'ripple']; why = ev + ' 放射状'; }
+                else if (an.radial < -0.35) { cands = ['concentric', 'ripple', 'scale', 'petal_rosette', 'wave']; why = ev + ' 同心状'; }
+                else if (an.coherence > 0.5 && an.curvature < 0.22) { cands = ['parallel', 'facet', 'dash_field', 'carbon_fiber', 'checker', 'meander']; why = ev + ' 直纹走势'; }
+                else if (an.coherence > 0.35) { cands = ['content_flow', 'flow', 'chevron', 'bilateral_flow', 'wave', 'zigzag']; why = ev + ' 随形走势'; }
+                else if (an.busy > 0.18) { cands = ['dot_field', 'short_curve', 'dash_field', 'scale', 'carbon_fiber']; why = ev + ' 细碎纹理'; }
+                else { cands = ['topographic', 'contour', 'wave', 'short_curve', 'dot_field']; why = ev + ' 平缓面'; }
+            } else {
+                why = why + '（' + ev + '）';
             }
+        }
+        r.candidates = cands;
+        r.why = why;
+        r.pattern = pickCandidate(cands, ctx);
+        r.reason = why + ' → 候选 ' + cands.length + ' 种';
+        if (w > 0 && h > 0) r.direction_deg = (an && an.ok) ? Math.round(an.dirDeg) : ((w >= h) ? 0 : 90);
+        return r;
+    }
+    /* 相邻判定: 包围盒重叠或间隙小于 margin(px)。用于"四色式"相邻差分。 */
+    function bboxAdjacent(a, b, margin) {
+        if (!a || !b || a.length !== 4 || b.length !== 4) return false;
+        var ax0 = toNum(a[0]), ay0 = toNum(a[1]), ax1 = toNum(a[2]), ay1 = toNum(a[3]);
+        var bx0 = toNum(b[0]), by0 = toNum(b[1]), bx1 = toNum(b[2]), by1 = toNum(b[3]);
+        return (ax0 - margin <= bx1) && (bx0 - margin <= ax1) && (ay0 - margin <= by1) && (by0 - margin <= ay1);
+    }
+    /* 整份图层表一次性建议: 按面积从大到小贪心, 相邻区块尽量不同纹样/不同家族。
+     * 返回与 infos 等长的数组; 每项同 suggest 的返回结构。 */
+    function suggestAll(infos, canvasW, canvasH) {
+        var n = infos.length, i, j;
+        var base = [];
+        for (i = 0; i < n; i++) base.push(suggest(infos[i], canvasW, canvasH, null));
+        var margin = Math.max(8, Math.min(canvasW, canvasH) * 0.02);
+        var adj = [];
+        for (i = 0; i < n; i++) adj.push([]);
+        for (i = 0; i < n; i++) for (j = i + 1; j < n; j++) {
+            if (bboxAdjacent(infos[i].bounds, infos[j].bounds, margin)) { adj[i].push(j); adj[j].push(i); }
+        }
+        var order = [];
+        for (i = 0; i < n; i++) {
+            var bd = infos[i].bounds, a = 0;
+            if (bd && bd.length === 4) a = Math.max(0, toNum(bd[2]) - toNum(bd[0])) * Math.max(0, toNum(bd[3]) - toNum(bd[1]));
+            order.push({ i: i, a: a });
+        }
+        /* 小区域先选(与生成的"子层优先"一致): 细节元素先占住自己的纹样,
+         * 容器/背景这类大块最后补空 —— 避免大容器先把候选锁死, 子层被迫重复。 */
+        order.sort(function (x, y) { return x.a - y.a; });
+        var used = {}, assigned = [];
+        for (i = 0; i < n; i++) assigned.push(null);
+        for (var oi = 0; oi < order.length; oi++) {
+            var idx = order[oi].i, r = base[idx];
+            if (r.skip || r.hide) { assigned[idx] = r; continue; }
+            var avoid = {}, avoidFam = {};
+            for (j = 0; j < adj[idx].length; j++) {
+                var nr = assigned[adj[idx][j]];
+                /* 跳过层与"不折光"层不参与视觉避让: 前者无内容, 后者输出隐藏 */
+                if (nr && !nr.skip && !nr.hide && nr.pattern) {
+                    avoid[nr.pattern] = true;
+                    if (PATTERN_FAMILY[nr.pattern]) avoidFam[PATTERN_FAMILY[nr.pattern]] = true;
+                }
+            }
+            var cands = r.candidates || [r.pattern];
+            var pick = pickCandidate(cands, { used: used, avoid: avoid, avoidFam: avoidFam });
+            r.pattern = pick;
+            if (avoid[pick]) r.direction_deg = (r.direction_deg + 45) % 180;   // 实在避不开时换个方向, 至少不同向
+            r.reason = (r.why || '') + '；选中 ' + pick + (avoid[pick] ? '（相邻已用同纹样，已换向 45°）' : '');
+            used[pick] = (used[pick] || 0) + 1;
+            assigned[idx] = r;
+        }
+        return assigned;
+    }
+    /* 单层建议(带当前分配上下文): 给 GUI "建议当前层" 用。
+     * patterns = 当前每层已选纹样键(与 infos 等长, 可为 null)。 */
+    function suggestFor(infos, canvasW, canvasH, k, patterns) {
+        var margin = Math.max(8, Math.min(canvasW, canvasH) * 0.02);
+        var used = {}, avoid = {}, avoidFam = {};
+        for (var i = 0; i < infos.length; i++) {
+            if (i === k) continue;
+            var p = patterns && patterns[i];
+            if (!p) continue;
+            used[p] = (used[p] || 0) + 1;
+            if (bboxAdjacent(infos[i].bounds, infos[k].bounds, margin)) {
+                avoid[p] = true;
+                if (PATTERN_FAMILY[p]) avoidFam[PATTERN_FAMILY[p]] = true;
+            }
+        }
+        var r = suggest(infos[k], canvasW, canvasH, { used: used, avoid: avoid, avoidFam: avoidFam });
+        if (!r.skip && !r.hide) {
+            if (avoid[r.pattern]) r.direction_deg = (r.direction_deg + 45) % 180;
+            r.reason = (r.why || '') + '；选中 ' + r.pattern + (avoid[r.pattern] ? '（相邻已用同纹样，已换向 45°）' : '');
         }
         return r;
     }
     var lastReadMode = '', lastSampleMs = null;
+
+    /* ---------------- 画面内容分析 (给建议器/随形流场提供"画面证据") ----------------
+     * 流程: 图层复制进一个专用分析文档 → 白底压平 → 缩到 ~96px 长边 → 存 24 位 BMP →
+     * 在 ExtendScript 里直接解析 BMP 字节(未压缩, 格式简单) → 算结构张量等特征。
+     * 全程不碰源文档; 分析文档建一次复用, 每层用完缩回原尺寸。
+     * 特征: 主走向(线方向)/方向一致度/弯折度/径向性/细节密度/内容占比 + 8x8 粗角度场。 */
+    function readBMP(f) {
+        try { f.encoding = 'BINARY'; } catch (eEnc) {}   // 二进制必须显式 BINARY, 默认编码会读出空串
+        if (!f.open('r')) return null;
+        var s = f.read();
+        f.close();
+        if (!s || s.length < 54) return null;
+        function u8(i) { return s.charCodeAt(i) & 0xff; }
+        function u16(i) { return u8(i) | (u8(i + 1) << 8); }
+        function u32(i) { return (u8(i) | (u8(i + 1) << 8) | (u8(i + 2) << 16)) + u8(i + 3) * 16777216; }
+        if (u8(0) !== 66 || u8(1) !== 77) return null;
+        var off = u32(10), w = u32(18), h = u32(22), bpp = u16(28);
+        var topDown = (h < 0);
+        if (topDown) h = -h;
+        if (bpp !== 24 && bpp !== 32) return null;
+        if (w <= 0 || h <= 0 || off + w * h * (bpp / 8) > s.length + 4) return null;
+        var bpr = (((w * bpp / 8) + 3) >> 2) << 2;
+        var lum = new Array(w * h), alpha = (bpp === 32) ? new Array(w * h) : null;
+        for (var y = 0; y < h; y++) {
+            var row = off + (topDown ? y : (h - 1 - y)) * bpr;
+            for (var x = 0; x < w; x++) {
+                var p = row + x * (bpp / 8), i = y * w + x;
+                lum[i] = (u8(p + 2) * 299 + u8(p + 1) * 587 + u8(p) * 114) / 1000;
+                if (alpha) alpha[i] = u8(p + 3);
+            }
+        }
+        return { w: w, h: h, lum: lum, alpha: alpha };
+    }
+    function computeFeatures(img) {
+        var w = img.w, h = img.h, lum = img.lum, alpha = img.alpha, n = w * h;
+        var i, x, y;
+        /* 信号 = 内容按透明度合成到中灰(浅色/深色内容都能出现梯度), 再按内容范围拉伸对比度
+         * (稀疏细纹理降采样后只剩几个灰阶, 不拉伸就全是"空")。 */
+        var sig = new Array(n), lo = 255, hi = 0, cov = 0;
+        for (i = 0; i < n; i++) {
+            var av = alpha ? alpha[i] : 255;
+            var s = (lum[i] * av + 128 * (255 - av)) / 255;
+            sig[i] = s;
+            if (!alpha || av > 12) { if (s < lo) lo = s; if (s > hi) hi = s; if (av > 12) cov++; }
+        }
+        var rng = hi - lo;
+        if (rng < 6) { lo = 0; rng = 255; }   // 近似平色: 不做拉伸(避免放大噪点)
+        for (i = 0; i < n; i++) {
+            var v = (sig[i] - lo) * 255 / rng;
+            sig[i] = v < 0 ? 0 : (v > 255 ? 255 : v);
+        }
+        /* 梯度 + 每像元"双角向量"(cos2θ, sin2θ), 纯算术无三角函数:
+         * θ 为线方向; 由梯度 (dx,dy) 得 cos2θ = (dy²−dx²)/m², sin2θ = −2dxdy/m²。
+         * 全局走向、分块弯折、8x8 角度场都由这些向量加权求和得到。 */
+        var NC = 8;
+        var gm = new Array(n), c2 = new Array(n), s2 = new Array(n);
+        var cellC = new Array(NC * NC), cellS = new Array(NC * NC), cellW = new Array(NC * NC);
+        for (i = 0; i < n; i++) { gm[i] = 0; c2[i] = 0; s2[i] = 0; }
+        for (i = 0; i < NC * NC; i++) { cellC[i] = 0; cellS[i] = 0; cellW[i] = 0; }
+        var E = 0, edgeN = 0, C2 = 0, S2 = 0;
+        for (y = 1; y < h - 1; y++) for (x = 1; x < w - 1; x++) {
+            i = y * w + x;
+            var tl = sig[i - w - 1], t = sig[i - w], tr = sig[i - w + 1];
+            var l = sig[i - 1], r = sig[i + 1];
+            var bl = sig[i + w - 1], b = sig[i + w], br = sig[i + w + 1];
+            var dx = (tr + 2 * r + br) - (tl + 2 * l + bl);
+            var dy = (bl + 2 * b + br) - (tl + 2 * t + tr);
+            var m2 = dx * dx + dy * dy, mag = Math.sqrt(m2);
+            gm[i] = mag;
+            if (mag > 60) edgeN++;
+            E += mag;
+            if (m2 > 1e-6) {
+                var c2a = (dy * dy - dx * dx) / m2, s2a = -2 * dx * dy / m2;
+                c2[i] = c2a; s2[i] = s2a;
+                C2 += mag * c2a; S2 += mag * s2a;
+                var ci = Math.min(NC - 1, Math.floor(y * NC / h)) * NC + Math.min(NC - 1, Math.floor(x * NC / w));
+                cellC[ci] += mag * c2a; cellS[ci] += mag * s2a; cellW[ci] += mag;
+            }
+        }
+        var coherence = (E > 1e-9) ? (Math.sqrt(C2 * C2 + S2 * S2) / E) : 0;
+        var dirDeg = ((0.5 * Math.atan2(S2, C2) * 180 / Math.PI) % 180 + 180) % 180;
+        /* 径向性: 线方向与"从质心向外"的双角余弦加权平均; >0 放射, <0 同心。
+         * cos2(θ−φ) = c2θ·cos2φ + s2θ·sin2φ, 其中 cos2φ/sin2φ 由相对质心的向量直接算出。 */
+        var cxw = 0, cyw = 0, W2 = 0;
+        for (y = 1; y < h - 1; y++) for (x = 1; x < w - 1; x++) {
+            i = y * w + x;
+            if (gm[i] > 30) { cxw += x * gm[i]; cyw += y * gm[i]; W2 += gm[i]; }
+        }
+        var cxm = cxw / (W2 || 1), cym = cyw / (W2 || 1);
+        var radSum = 0, radW = 0;
+        for (y = 1; y < h - 1; y++) for (x = 1; x < w - 1; x++) {
+            i = y * w + x;
+            if (gm[i] <= 30) continue;
+            var px = x - cxm, py = y - cym, r2 = px * px + py * py;
+            if (r2 < 1) continue;
+            radSum += gm[i] * (c2[i] * ((px * px - py * py) / r2) + s2[i] * (2 * px * py / r2));
+            radW += gm[i];
+        }
+        var radial = radSum / (radW || 1);
+        /* 弯折度: 8x8 分块主方向在相邻块间的平均转角(弧度) */
+        var curvSum = 0, curvN = 0;
+        for (var cy2 = 0; cy2 < NC; cy2++) for (var cx2 = 0; cx2 < NC; cx2++) {
+            var ciA = cy2 * NC + cx2;
+            if (cellW[ciA] < 1) continue;
+            var nbs = [[cx2 + 1, cy2], [cx2, cy2 + 1]];
+            for (var nb = 0; nb < 2; nb++) {
+                if (nbs[nb][0] >= NC || nbs[nb][1] >= NC) continue;
+                var ciB = nbs[nb][1] * NC + nbs[nb][0];
+                if (cellW[ciB] < 1) continue;
+                var tA = 0.5 * Math.atan2(cellS[ciA], cellC[ciA]), tB = 0.5 * Math.atan2(cellS[ciB], cellC[ciB]);
+                var dth = Math.abs(tA - tB);
+                while (dth > Math.PI / 2) dth = Math.abs(dth - Math.PI);
+                curvSum += dth; curvN++;
+            }
+        }
+        /* 8x8 粗角度场(供随形流线用): 只覆盖有内容(梯度)的范围 */
+        var bx0 = w, by0 = h, bx1 = 0, by1 = 0;
+        for (y = 1; y < h - 1; y++) for (x = 1; x < w - 1; x++) {
+            if (gm[y * w + x] > 30) {
+                if (x < bx0) bx0 = x; if (x > bx1) bx1 = x;
+                if (y < by0) by0 = y; if (y > by1) by1 = y;
+            }
+        }
+        var field = null;
+        if (bx1 > bx0 && by1 > by0) {
+            var NF = 8;
+            field = { nx: NF, ny: NF, x0: bx0, y0: by0, x1: bx1 + 1, y1: by1 + 1, cos2: [], sin2: [], w: [] };
+            for (var fi = 0; fi < NF * NF; fi++) { field.cos2.push(0); field.sin2.push(0); field.w.push(0); }
+            var fw = bx1 - bx0 + 1, fh = by1 - by0 + 1;
+            for (y = by0; y <= by1; y++) for (x = bx0; x <= bx1; x++) {
+                i = y * w + x;
+                if (gm[i] <= 30) continue;
+                var fidx = Math.min(NF - 1, Math.floor((y - by0) * NF / fh)) * NF + Math.min(NF - 1, Math.floor((x - bx0) * NF / fw));
+                field.cos2[fidx] += gm[i] * c2[i];
+                field.sin2[fidx] += gm[i] * s2[i];
+                field.w[fidx] += gm[i];
+            }
+        }
+        return {
+            ok: true,
+            dirDeg: dirDeg,
+            coherence: coherence,
+            curvature: curvN ? (curvSum / curvN) : 0,
+            radial: radial,
+            busy: n ? (edgeN / n) : 0,
+            fill: n ? (cov / n) : 0,
+            w: w, h: h,
+            field: field
+        };
+    }
+    function analyzeLayer(srcDoc, layer, reuse) {
+        var prevDoc = app.activeDocument, oldUnits = app.preferences.rulerUnits;
+        var out = { ok: false };
+        var tAll = new Date().getTime(), tLast = tAll, msAcc = {};
+        function tick(k) { var now = new Date().getTime(); msAcc[k] = now - tLast; tLast = now; }
+        try {
+            app.preferences.rulerUnits = Units.PIXELS;
+            var W = srcDoc.width.as('px'), H = srcDoc.height.as('px');
+            var doc = (reuse && reuse.doc) ? reuse.doc : null;
+            if (!doc) {
+                doc = app.documents.add(srcDoc.width, srcDoc.height, srcDoc.resolution, 'ZG_analyze_sample', NewDocumentMode.RGB, DocumentFill.TRANSPARENT);
+                if (reuse) reuse.doc = doc;
+            } else {
+                app.activeDocument = doc;
+                if (Math.round(doc.width.as('px')) !== Math.round(W) || Math.round(doc.height.as('px')) !== Math.round(H))
+                    doc.resizeImage(W, H, doc.resolution, ResampleMethod.BILINEAR);
+            }
+            tick('prep');
+            app.activeDocument = doc;
+            var base = resetTempDoc(doc);
+            if (!base) throw new Error('分析文档复位失败');
+            /* 中灰底: 深色/浅色/半透明内容合成后都会偏离中灰, 配合对比度拉伸都能出梯度;
+             * 白底会把浅色内容(高光层)和稀疏细纹洗掉, 黑底则丢掉深色内容。 */
+            var gray = new SolidColor(); gray.rgb.hexValue = '808080';
+            doc.selection.selectAll(); doc.selection.fill(gray); doc.selection.deselect();
+            tick('resetFill');
+            app.activeDocument = srcDoc;
+            var dup = layer.duplicate(doc, ElementPlacement.PLACEATBEGINNING);
+            tick('dup');
+            app.activeDocument = doc;
+            dup.visible = true;
+            try { doc.mergeVisibleLayers(); } catch (eM) {}
+            tick('merge');
+            var longSide = Math.max(W, H), sc = 128 / longSide;
+            var aw = Math.max(8, Math.round(W * sc)), ah = Math.max(8, Math.round(H * sc));
+            doc.resizeImage(aw, ah, doc.resolution, ResampleMethod.BILINEAR);
+            tick('resizeDown');
+            var bmp = new File(Folder.temp.fsName + '/ZG_analyze_' + String(new Date().getTime()) + '.bmp');
+            var opts = new BMPSaveOptions();
+            opts.alphaChannels = false;   // PS 的 32 位 BMP alpha 字节恒为 0, 透明度改用中灰底表达
+            try { opts.depth = BMPDepthType.TWENTYFOUR; } catch (eD) {}
+            opts.rleCompression = false;
+            opts.flipRowOrder = false;
+            doc.saveAs(bmp, opts, true);
+            tick('save');
+            var img = readBMP(bmp);
+            tick('read');
+            try { bmp.remove(); } catch (eR) {}
+            doc.resizeImage(W, H, doc.resolution, ResampleMethod.BILINEAR);
+            tick('resizeUp');
+            if (img) {
+                var f = computeFeatures(img);
+                tick('compute');
+                f.scale = W / aw;                      // 分析图 → 画布像素
+                if (f.field) {
+                    f.field.x0 *= f.scale; f.field.y0 *= f.scale;
+                    f.field.x1 *= f.scale; f.field.y1 *= f.scale;
+                }
+                out = f;
+            }
+            tick('total');
+            out.ms = msAcc;
+        } catch (e) {
+            out.ok = false; out.err = (e && e.message) ? e.message : String(e);
+        } finally {
+            try { app.activeDocument = prevDoc; } catch (eF) {}
+            app.preferences.rulerUnits = oldUnits;
+        }
+        return out;
+    }
+
     /* 取样用的临时文档只建一次并复用。
      * 原因: 逐层新建/关闭文档会在几十层后触发 Photoshop「不能创建新文档…没有足够的空间来停放它们」，
      * 一旦触发后续所有层都会失败(实测 17:28 那次 91 层全废)。复用同一个文档同时也更快。 */
@@ -789,6 +1157,20 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
                 plog('剪贴层识别: ' + layer.name + ' ← 基底 ' + clipBase.name);
             }
             stage = '复制待取样图层';
+            /* 大面积高分辨率软渐变层(如布料阴影)的 alpha 阈值轮廓极其琐碎, makeWorkPath 可能
+             * 几十分钟不返回(010 实测 1200ppi 的 blouse-shade and light 卡住 15 分钟以上)。
+             * 对"大层 + 高分辨率"在转路径前先做 1–2px 高斯模糊磨平轮廓: 路径点少几个数量级,
+             * 区域蒙版只差零点几毫米(1200ppi 下 2px ≈ 0.04mm), 肉眼与工艺都可忽略。 */
+            var blurR = 0;
+            try {
+                var lb = layer.bounds;
+                var lw = toNum(lb[2]) - toNum(lb[0]), lh = toNum(lb[3]) - toNum(lb[1]);
+                if (lw > 800 && lh > 800 && doc.resolution >= 600) {
+                    blurR = doc.resolution >= 900 ? 2 : 1;
+                    if (tol < blurR) tol = blurR;   // 大层高分辨率时路径容差同步放宽, 进一步减少锚点
+                    plog('取样: 大层@' + doc.resolution + 'ppi, 转路径前高斯模糊 ' + blurR + 'px 平滑轮廓');
+                }
+            } catch (eLB) {}
             var copied = layer.duplicate(temp, ElementPlacement.PLACEATBEGINNING);
             app.activeDocument = temp;
             copied.visible = true;
@@ -796,6 +1178,7 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
             var raster = null;
             if (clipped) {
                 stage = '读取剪贴层自身透明度';
+                if (blurR) { try { copied.applyGaussianBlur(blurR); } catch (eB1) {} }
                 loadTransparency(temp, copied);
                 try { temp.selection.bounds; } catch (eEmptyClip) { return []; }
                 var regionCh = temp.channels.add();
@@ -816,6 +1199,7 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
                 var rb2 = raster.bounds;
                 if (toNum(rb2[2]) <= toNum(rb2[0]) || toNum(rb2[3]) <= toNum(rb2[1])) { try { regionCh.remove(); } catch (eC0) {} return []; }
                 stage = '载入剪贴基底透明度';
+                if (blurR) { try { raster.applyGaussianBlur(blurR); } catch (eB2) {} }
                 loadTransparency(temp, raster);
                 temp.selection.load(regionCh, SelectionType.INTERSECT);
                 try { regionCh.remove(); } catch (eC1) {}
@@ -833,6 +1217,7 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
                 var rb = raster.bounds;
                 if (toNum(rb[2]) <= toNum(rb[0]) || toNum(rb[3]) <= toNum(rb[1])) return [];
                 stage = '载入渲染透明度';
+                if (blurR) { try { raster.applyGaussianBlur(blurR); } catch (eB3) {} }
                 loadTransparency(temp, raster);
             }
             var bd;
@@ -840,6 +1225,7 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
             if (toNum(bd[2]) <= toNum(bd[0]) || toNum(bd[3]) <= toNum(bd[1])) return [];
             tLoad = new Date().getTime();
             stage = '把选区转换为工作路径';
+            plog('取样: 选区→工作路径(tol=' + tol + ') 开始...');
             temp.selection.makeWorkPath(tol);
             tMwp = new Date().getTime();
             // Photoshop 2020 returns void; obtain the work path from PathItems.
@@ -959,6 +1345,79 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
             ss += cfg.linePx + gap;
         }
         return polys;
+    }
+    /* 随形流场: 沿画面分析得到的 8x8 角度场积分出流线, 方向随内容无缝变化;
+     * 累计转角超阈值时收尾另起一段(留一个疏隙), 得到"分段走势"而不是长线乱拐。
+     * cfg.flowField = { nx, ny, x0, y0, x1, y1, cos2[], sin2[], w[] } (画布像素);
+     * 没有场时退回普通 genFlow。 */
+    function genContentFlow(b, cfg) {
+        var F = cfg.flowField;
+        if (!F || !F.nx || !F.ny || !F.cos2) return genFlow(b, cfg);
+        var pitch = cfg.linePx + cfg.gapMidPx;
+        function dirAt(x, y) {
+            var u = (x - F.x0) / (F.x1 - F.x0) * (F.nx - 1);
+            var v = (y - F.y0) / (F.y1 - F.y0) * (F.ny - 1);
+            if (u < 0) u = 0; if (u > F.nx - 1) u = F.nx - 1;
+            if (v < 0) v = 0; if (v > F.ny - 1) v = F.ny - 1;
+            var x0 = Math.floor(u), y0 = Math.floor(v);
+            var x1 = Math.min(F.nx - 1, x0 + 1), y1 = Math.min(F.ny - 1, y0 + 1);
+            var fx = u - x0, fy = v - y0;
+            var i00 = y0 * F.nx + x0, i10 = y0 * F.nx + x1, i01 = y1 * F.nx + x0, i11 = y1 * F.nx + x1;
+            var c = F.cos2[i00] * (1 - fx) * (1 - fy) + F.cos2[i10] * fx * (1 - fy) + F.cos2[i01] * (1 - fx) * fy + F.cos2[i11] * fx * fy;
+            var s = F.sin2[i00] * (1 - fx) * (1 - fy) + F.sin2[i10] * fx * (1 - fy) + F.sin2[i01] * (1 - fx) * fy + F.sin2[i11] * fx * fy;
+            if (Math.abs(c) + Math.abs(s) < 1e-9) return cfg.dirRad;
+            return 0.5 * Math.atan2(s, c);
+        }
+        var cell = pitch * 1.15;
+        var gx0 = Math.floor(b.x0 / cell) - 1, gy0 = Math.floor(b.y0 / cell) - 1;
+        var gx1 = Math.ceil(b.x1 / cell) + 1, gy1 = Math.ceil(b.y1 / cell) + 1;
+        var gw = gx1 - gx0 + 1;
+        var occ = new Array(gw * (gy1 - gy0 + 1));
+        for (var oi = 0; oi < occ.length; oi++) occ[oi] = 0;
+        function mark(x, y) {
+            var cx = Math.floor(x / cell) - gx0, cy = Math.floor(y / cell) - gy0;
+            if (cx >= 0 && cy >= 0 && cx < gw && cy < gy1 - gy0 + 1) occ[cy * gw + cx] = 1;
+        }
+        function isOcc(x, y) {
+            var cx = Math.floor(x / cell) - gx0, cy = Math.floor(y / cell) - gy0;
+            if (cx < 0 || cy < 0 || cx >= gw || cy >= gy1 - gy0 + 1) return false;
+            return occ[cy * gw + cx] === 1;
+        }
+        var polys = [], guard = 0;
+        var traceStep = Math.max(cfg.linePx * 1.2, pitch * 0.5);
+        /* 从种子点向两个方向各追一条, 拼成整条流线; 累计转角超约 90° 或撞到已占位就收尾
+         * (收尾处自然留缝, 网格上后续种子会从缝里再起一段 —— 这就是"无缝分段走势")。 */
+        function traceOne(sx, sy, sgn) {
+            var pts = [], x = sx, y = sy, prevA = dirAt(sx, sy), cum = 0;
+            for (var step = 0; step < 600; step++) {
+                var a = dirAt(x, y);
+                var dA = a - prevA;
+                while (dA > Math.PI / 2) dA -= Math.PI;
+                while (dA < -Math.PI / 2) dA += Math.PI;
+                if (Math.abs(dA) > 0.9) break;                     // 方向突变: 视为边界
+                var nx2 = x + sgn * Math.cos(a) * traceStep, ny2 = y + sgn * Math.sin(a) * traceStep;
+                if (nx2 < b.x0 - pitch || nx2 > b.x1 + pitch || ny2 < b.y0 - pitch || ny2 > b.y1 + pitch) break;
+                if (isOcc(nx2, ny2)) break;                        // 已占位: 收尾, 不撞线
+                x = nx2; y = ny2; prevA = a;
+                pts.push([x, y]);
+                cum += Math.abs(dA);
+                if (cum > Math.PI * 0.5) break;                    // 分段: 本段到此为止
+            }
+            return pts;
+        }
+        for (var sy = b.y0 + pitch * 0.5; sy < b.y1 && guard < 20000; sy += pitch) {
+            for (var sx = b.x0 + pitch * 0.5; sx < b.x1 && guard < 20000; sx += pitch) {
+                if (isOcc(sx, sy)) continue;
+                var back = traceOne(sx, sy, -1);
+                back.reverse();
+                var line = back.concat([[sx, sy]], traceOne(sx, sy, 1));
+                if (line.length < 4) { mark(sx, sy); continue; }
+                for (var mi = 0; mi < line.length; mi++) mark(line[mi][0], line[mi][1]);
+                polys.push(offsetPolyline(line, cfg.linePx / 2));
+                guard++;
+            }
+        }
+        return polys.length ? polys : genFlow(b, cfg);
     }
     function tri(u) { var f = u - Math.floor(u); return f < 0.5 ? 4 * f - 1 : 3 - 4 * f; }
     function parallelFamily(b, cfg, dispFn, samples) {
@@ -1662,6 +2121,7 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
              * 逐层新建/关闭文档会在若干层后触发 Photoshop「不能创建新文档…没有足够空间停放」，
              * 之后所有层都会失败；复用同一个文档即可避免，同时更快。 */
             var sampleReuse = { doc: null };
+        var analysisReuse = { doc: null };
             if (!config.fast) {
                 stage = '建立取样临时文档';
                 ensureTempDoc(src, sampleReuse);
@@ -1884,8 +2344,14 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
 
                 var polys;
                 stage = '生成纹样: ' + srcPath;
+                if (pattern === 'content_flow' && !cfg.flowField) {
+                    /* 随形流场需要画面分析: GUI 已分析过会带在 L.analysis 里, 否则现算一次 */
+                    var anF = (L.analysis && L.analysis.field) ? L.analysis : analyzeLayer(src, layer, analysisReuse);
+                    if (anF && anF.ok && anF.field) cfg.flowField = anF.field;
+                }
                 if (pattern === 'parallel' || pattern === 'facet') polys = genFacet(b, cfg);
                 else if (pattern === 'flow') polys = genFlow(b, cfg);
+                else if (pattern === 'content_flow') polys = genContentFlow(b, cfg);
                 else if (pattern === 'wave') polys = genWave(b, cfg);
                 else if (pattern === 'zigzag') polys = genZigzag(b, cfg);
                 else if (pattern === 'chevron') polys = genChevron(b, cfg);
@@ -2142,6 +2608,10 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
                 try { sampleReuse.doc.close(SaveOptions.DONOTSAVECHANGES); } catch (eSC) {}
                 sampleReuse.doc = null;
             }
+            if (analysisReuse && analysisReuse.doc) {
+                try { analysisReuse.doc.close(SaveOptions.DONOTSAVECHANGES); } catch (eAC) {}
+                analysisReuse.doc = null;
+            }
             if (master && !saved) master.close(SaveOptions.DONOTSAVECHANGES);
             app.preferences.rulerUnits = oldUnits;
             app.displayDialogs = oldDialogs;
@@ -2151,6 +2621,10 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
     ZG.generate = generate;
     ZG.collectLayers = collectLayers;
     ZG.suggest = suggest;
+    ZG.suggestAll = suggestAll;
+    ZG.suggestFor = suggestFor;
+    ZG.PATTERN_FAMILY = PATTERN_FAMILY;
+    ZG.analyzeLayer = analyzeLayer;
     ZG.sanitize = sanitize;
     ZG.num = num;
     ZG.pathReadInfo = function () { return pathReadInfo; };
@@ -2163,6 +2637,8 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
         subSignedArea: subSignedArea,
         subPerimeter: subPerimeter,
         genMoireRadial: genMoireRadial,
+        genContentFlow: genContentFlow,
+        computeFeatures: computeFeatures,
         getRegionSubs: getRegionSubs,
         subsBBox: subsBBox,
         subsPxToPt: subsPxToPt,

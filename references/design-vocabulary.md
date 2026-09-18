@@ -43,5 +43,6 @@
 |---|---|
 | field-rings | `genConcentric`，中心=该层中心（或卡片中心），半径覆盖场域 |
 | osmanthus-flow / band-flow / central-flow | `genFlow`，方向沿枝条/带/主体长轴 |
+| 随形笔画、发丝、衣褶、水波（走向以画面为准） | `genContentFlow`（`content_flow`）：按该层画面的粗角度场积分出流线，方向随形体无缝变化、按段收尾；适合"图层本身有明确走向弯折"的内容，也可先用它出草稿再手绘精修 |
 | corner-fan | `genFan`，中心=四角角点，方向指向卡内，展开约 90°，内半径取约 3.5 mm 保证射线密度（≈20 根） |
 | ornament-flow | 程序脚本不实现，走手工矢量（或在矢量软件中生成路径后人工精修） |

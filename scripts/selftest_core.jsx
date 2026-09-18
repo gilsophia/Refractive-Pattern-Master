@@ -96,6 +96,18 @@
                 if (d2 < minD2) minD2 = d2;
             }
         eq('指定内径 400px 时按指定留空', minD2 > 300 ? 'ok' : minD2.toFixed(1), 'ok');
+        /* 4) 随形流场: 合成 S 形角度场应生成连续流线 */
+        var NF = 8, FW = 200, FH = 200;
+        var ff = { nx: NF, ny: NF, x0: 0, y0: 0, x1: FW, y1: FH, cos2: [], sin2: [], w: [] };
+        for (var fy = 0; fy < NF; fy++) for (var fx = 0; fx < NF; fx++) {
+            var aa = Math.PI / 2 + 0.6 * Math.sin(2 * Math.PI * (fx + 0.5) / NF);
+            ff.cos2.push(Math.cos(2 * aa)); ff.sin2.push(Math.sin(2 * aa)); ff.w.push(1);
+        }
+        var cfgCF = { linePx: 5, gapDensePx: 5, gapMidPx: 6, gapSparsePx: 8, dirRad: Math.PI / 2, flowField: ff };
+        var cf = ST.genContentFlow({ x0: 0, y0: 0, x1: FW, y1: FH }, cfgCF);
+        eq('随形流场多边形数 > 10', cf.length > 10 ? 'ok' : String(cf.length), 'ok');
+        var cfPts = 0; for (var cp = 0; cp < cf.length; cp++) cfPts += cf[cp].length;
+        eq('随形流场节点数 > 100', cfPts > 100 ? 'ok' : String(cfPts), 'ok');
         t('结论', fails ? ('有 ' + fails + ' 项不符, 请检查 Photoshop 版本/脚本文件是否配套') : '全部通过');
     } catch (e) {
         fails++;
