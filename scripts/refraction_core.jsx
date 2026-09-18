@@ -2,7 +2,7 @@
  * 由 generate_refraction.jsx (job.json 模式) 与 generate_refraction_gui.jsx (手动分配模式) 通过 $.evalFile 共用。
  * 不包含 UI 与 JSON 解析, 只暴露 ZG.generate / ZG.collectLayers 等。 */
 var ZG = {};
-var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实际运行的版本
+var ZG_CORE_VERSION = '2026-09-18a';   // 便于在 zg_progress.txt 里确认实际运行的版本
 
 (function () {
     var c = charIDToTypeID, s = stringIDToTypeID;
@@ -1292,16 +1292,24 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
     }
     function offsetPolyline(points, half) {
         var n = points.length, top = [], bot = [];
+        var bx0 = 1e18, by0 = 1e18, bx1 = -1e18, by1 = -1e18;
         for (var i = 0; i < n; i++) {
             var prev = points[i === 0 ? 0 : i - 1], next = points[i === n - 1 ? n - 1 : i + 1];
             var dx = next[0] - prev[0], dy = next[1] - prev[1], len = Math.sqrt(dx * dx + dy * dy);
             var nx, ny;
             if (len < 1e-6) { nx = 0; ny = 1; } else { nx = -dy / len; ny = dx / len; }
-            top.push([points[i][0] + nx * half, points[i][1] + ny * half]);
-            bot.push([points[i][0] - nx * half, points[i][1] - ny * half]);
+            var ax = points[i][0] + nx * half, ay = points[i][1] + ny * half;
+            var cx2 = points[i][0] - nx * half, cy2 = points[i][1] - ny * half;
+            top.push([ax, ay]);
+            bot.push([cx2, cy2]);
+            if (ax < bx0) bx0 = ax; if (ax > bx1) bx1 = ax;
+            if (ay < by0) by0 = ay; if (ay > by1) by1 = ay;
+            if (cx2 < bx0) bx0 = cx2; if (cx2 > bx1) bx1 = cx2;
+            if (cy2 < by0) by0 = cy2; if (cy2 > by1) by1 = cy2;
         }
         var poly = top.slice(0);
         for (var j = bot.length - 1; j >= 0; j--) poly.push(bot[j]);
+        poly._bb = [bx0, by0, bx1, by1];   // 顺手记录包围盒, 区域裁剪时免去逐点扫描
         return poly;
     }
     function projections(b, cfg) {
@@ -1354,6 +1362,10 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
         var F = cfg.flowField;
         if (!F || !F.nx || !F.ny || !F.cos2) return genFlow(b, cfg);
         var pitch = cfg.linePx + cfg.gapMidPx;
+        /* 密度与 flow 对齐: 占位格 = 目标中心距(线宽+中隙, 与 flow 默认间距一致), 种子按 0.6 格布点,
+         * 这样相邻流线的中心距能贴近 pitch, 而不是被更大的格子量化成稀疏结果。 */
+        var cell = Math.max(pitch, cfg.linePx * 1.5);
+        var seedStep = cell * 0.5;
         function dirAt(x, y) {
             var u = (x - F.x0) / (F.x1 - F.x0) * (F.nx - 1);
             var v = (y - F.y0) / (F.y1 - F.y0) * (F.ny - 1);
@@ -1368,7 +1380,6 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
             if (Math.abs(c) + Math.abs(s) < 1e-9) return cfg.dirRad;
             return 0.5 * Math.atan2(s, c);
         }
-        var cell = pitch * 1.15;
         var gx0 = Math.floor(b.x0 / cell) - 1, gy0 = Math.floor(b.y0 / cell) - 1;
         var gx1 = Math.ceil(b.x1 / cell) + 1, gy1 = Math.ceil(b.y1 / cell) + 1;
         var gw = gx1 - gx0 + 1;
@@ -1383,8 +1394,15 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
             if (cx < 0 || cy < 0 || cx >= gw || cy >= gy1 - gy0 + 1) return false;
             return occ[cy * gw + cx] === 1;
         }
+        /* 只在"左右一格内都没有线"的空区起笔(沿流向方向不限制):
+         * 避免贴着已有流线起笔、一迈步就被截成小点; 又不至于像 3x3 检查那样把密度压太低。 */
+        function openArea(x, y) {
+            var a = dirAt(x, y);
+            var px2 = -Math.sin(a) * cell * 0.4, py2 = Math.cos(a) * cell * 0.4;
+            return !isOcc(x + px2, y + py2) && !isOcc(x - px2, y - py2);
+        }
         var polys = [], guard = 0;
-        var traceStep = Math.max(cfg.linePx * 1.2, pitch * 0.5);
+        var traceStep = Math.max(cfg.linePx * 0.8, cell * 0.3);
         /* 从种子点向两个方向各追一条, 拼成整条流线; 累计转角超约 90° 或撞到已占位就收尾
          * (收尾处自然留缝, 网格上后续种子会从缝里再起一段 —— 这就是"无缝分段走势")。 */
         function traceOne(sx, sy, sgn) {
@@ -1401,17 +1419,17 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
                 x = nx2; y = ny2; prevA = a;
                 pts.push([x, y]);
                 cum += Math.abs(dA);
-                if (cum > Math.PI * 0.5) break;                    // 分段: 本段到此为止
+                if (cum > Math.PI * 0.8) break;                    // 分段: 本段到此为止(放宽阈值, 线更长更连贯)
             }
             return pts;
         }
-        for (var sy = b.y0 + pitch * 0.5; sy < b.y1 && guard < 20000; sy += pitch) {
-            for (var sx = b.x0 + pitch * 0.5; sx < b.x1 && guard < 20000; sx += pitch) {
-                if (isOcc(sx, sy)) continue;
+        for (var sy = b.y0 + seedStep * 0.5; sy < b.y1 && guard < 20000; sy += seedStep) {
+            for (var sx = b.x0 + seedStep * 0.5; sx < b.x1 && guard < 20000; sx += seedStep) {
+                if (isOcc(sx, sy) || !openArea(sx, sy)) continue;
                 var back = traceOne(sx, sy, -1);
                 back.reverse();
                 var line = back.concat([[sx, sy]], traceOne(sx, sy, 1));
-                if (line.length < 4) { mark(sx, sy); continue; }
+                if (line.length < 3) continue;   // 太短就不画、也不占位, 让邻格种子把空隙补上
                 for (var mi = 0; mi < line.length; mi++) mark(line[mi][0], line[mi][1]);
                 polys.push(offsetPolyline(line, cfg.linePx / 2));
                 guard++;
@@ -1614,7 +1632,9 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
         var seg = arcSegments(r);
         var pts = [];
         for (var i = 0; i <= seg; i++) { var th = i / seg * 2 * Math.PI; pts.push([cx + r * Math.cos(th), cy + r * Math.sin(th)]); }
-        return offsetPolyline(pts, half);
+        var poly = offsetPolyline(pts, half);
+        poly._bb = [cx - r - half, cy - r - half, cx + r + half, cy + r + half];
+        return poly;
     }
     function ellipseRibbon(cx, cy, rx, ry, rot, half) {
         var seg = arcSegments(Math.max(rx, ry));
@@ -1851,11 +1871,18 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
     function genScale(b, cfg) {
         // Smaller overlapping scales keep the rows visually continuous.
         var cell = unitCellPx(cfg, 2, 3), half = cfg.linePx / 2, polys = [], row = 0;
+        var rr = cell * 0.36, rOut = rr + half;
+        /* 单位弧只算一次(每片鳞的弧角度相同) */
+        var uc = new Array(17), us = new Array(17);
+        for (var u = 0; u <= 16; u++) { var th0 = Math.PI + Math.PI * u / 16; uc[u] = Math.cos(th0); us[u] = Math.sin(th0); }
+        var G = cfg.regionGrid;
         for (var y = b.y0; y < b.y1; y += cell * 0.65) {
             var off = (row % 2) * cell / 2;
             for (var x = b.x0 + off; x < b.x1; x += cell) {
+                /* 区域外元素直接不生成(与裁剪阶段丢弃等价, 不改变输出); 大稀疏区域能省近一半 */
+                if (G && gridRectOutside(G, x - rOut - half, y - rOut - half, x + rOut + half, y + half)) continue;
                 var pts = [];
-                for (var i = 0; i <= 16; i++) { var th = Math.PI + Math.PI * i / 16; pts.push([x + cell * 0.36 * Math.cos(th), y + cell * 0.36 * Math.sin(th)]); }
+                for (var i = 0; i <= 16; i++) pts.push([x + cell * 0.36 * uc[i], y + cell * 0.36 * us[i]]);
                 polys.push(offsetPolyline(pts, half));
             }
             row++;
@@ -1889,9 +1916,13 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
         if (r > rMax) r = rMax;
         if (r < cfg.linePx / 2) r = cfg.linePx / 2;
         var half = cfg.linePx / 2, polys = [], row = 0;
+        var G = cfg.regionGrid;
         for (var y = b.y0; y < b.y1; y += cell) {
             var off = (row % 2) * cell / 2;
-            for (var x = b.x0 + off; x < b.x1; x += cell) polys.push(circleRibbon(x, y, r, half));
+            for (var x = b.x0 + off; x < b.x1; x += cell) {
+                if (G && gridRectOutside(G, x - r - half, y - r - half, x + r + half, y + r + half)) continue;
+                polys.push(circleRibbon(x, y, r, half));
+            }
             row++;
         }
         return polys;
@@ -1916,66 +1947,171 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
     /* ---------------- 区域裁剪: 只保留真正落在区域里的纹样 ----------------
      * 001 实测: 失败的大层都是"大 bbox + 稀疏内容"——图层13 的 bbox 是 1666x770, 但不透明像素
      * 只占 7.8%, 图层48 只有 1.6%。纹样是按 bbox 生成的, 于是十几倍的线都落在区域外, 既撞安全
-     * 预算又白建形状层(蒙版本来也会把它们裁掉)。这里按区域子路径建粗网格索引, 用偶数交叉规则
-     * 判断"这个点是否在区域内"(孔洞天然算对), 沿多边形轮廓取样, 一条都不在区域内的就丢掉。
-     * 结果与蒙版裁切后的成品一致; contour/topographic 这类本来就贴着区域轮廓生成的纹样不筛。 */
-    function buildRegionIndex(subs, cellPx) {
+     * 预算又白建形状层(蒙版本来也会把它们裁掉)。这里用偶数交叉规则判断"点是否在区域内"(孔洞天然
+     * 算对), 沿多边形轮廓取样, 一条都不在区域内的就丢掉。结果与蒙版裁切后的成品一致;
+     * contour/topographic 这类本来就贴着区域轮廓生成的纹样不筛。
+     *
+     * 加速(2026-09-17, v0.3): 原实现每个采样点都遍历候选子路径的全部节点做 even-odd,
+     * 大区域(子路径上千、节点数万)时单层要 5-7 分钟(010 实测 Velvet_S 425 秒 / hot stamp 334 秒)。
+     * 现改为"细网格奇偶栅格":
+     *   1) 区域子路径的每条线段按 DDA 写入细网格, 同时把线段记进它经过的每个格子;
+     *   2) 逐行扫描线在格心求奇偶(区域外→内翻转) → 每格的"格心内外";
+     *   3) 查询任意点: 若所在格没有线段 → 直接用格心奇偶; 若有线段 → 从格心到该点连一段线,
+     *      数它与格内线段的交叉次数, 奇偶翻转即得 —— 与逐点 even-odd 数学等价(测度零差异);
+     *   4) 多边形先用面积和(前缀和)O(1) 判断"包围盒内是否全是没有线段的格子", 是则整块一次判定。
+     * 结果与原逐点采样一致(不降生成质量), 大层从几分钟降到几秒。 */
+    function segIntersect(ax, ay, bx, by, cx, cy, dx2, dy2) {
+        var d1 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+        var d2 = (bx - ax) * (dy2 - ay) - (by - ay) * (dx2 - ax);
+        var d3 = (dx2 - cx) * (ay - cy) - (dy2 - cy) * (ax - cx);
+        var d4 = (dx2 - cx) * (by - cy) - (dy2 - cy) * (bx - cx);
+        return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+    }
+    function buildParityGrid(subs, cellPx) {
         var bb = subsBBox(subs);
         if (!bb) return null;
-        var cell = Math.max(cellPx || 64, 1);
+        var cell = Math.max(4, cellPx || 12);
         var cols = Math.max(1, Math.ceil((bb[2] - bb[0]) / cell) + 1);
         var rows = Math.max(1, Math.ceil((bb[3] - bb[1]) / cell) + 1);
-        var polys = [], boxes = [];
-        for (var i = 0; i < subs.length; i++) {
-            var pts = subs[i].entireSubPath, poly = [];
-            for (var j = 0; j < pts.length; j++) poly.push([pts[j].anchor[0], pts[j].anchor[1]]);
-            if (poly.length < 3) continue;
-            var x0 = 1e18, y0 = 1e18, x1 = -1e18, y1 = -1e18;
-            for (j = 0; j < poly.length; j++) {
-                if (poly[j][0] < x0) x0 = poly[j][0]; if (poly[j][0] > x1) x1 = poly[j][0];
-                if (poly[j][1] < y0) y0 = poly[j][1]; if (poly[j][1] > y1) y1 = poly[j][1];
+        var cellEdges = new Array(cols * rows);
+        var rowSegs = new Array(rows), i;
+        for (i = 0; i < rows; i++) rowSegs[i] = null;
+        function addEdge(ax, ay, bx, by) {
+            if (ay !== by) {   // 水平段不参与水平射线
+                var r0 = Math.max(0, Math.floor((Math.min(ay, by) - bb[1]) / cell));
+                var r1 = Math.min(rows - 1, Math.floor((Math.max(ay, by) - bb[1]) / cell));
+                for (var r = r0; r <= r1; r++) {
+                    if (!rowSegs[r]) rowSegs[r] = [];
+                    rowSegs[r].push(ax, ay, bx, by);
+                }
             }
-            polys.push(poly); boxes.push([x0, y0, x1, y1]);
-        }
-        if (!polys.length) return null;
-        var grid = [];
-        for (i = 0; i < cols * rows; i++) grid.push(null);
-        for (i = 0; i < polys.length; i++) {
-            var bx = boxes[i];
-            var c0 = Math.max(0, Math.floor((bx[0] - bb[0]) / cell)), c1 = Math.min(cols - 1, Math.floor((bx[2] - bb[0]) / cell));
-            var r0 = Math.max(0, Math.floor((bx[1] - bb[1]) / cell)), r1 = Math.min(rows - 1, Math.floor((bx[3] - bb[1]) / cell));
-            for (var r = r0; r <= r1; r++) for (var c2 = c0; c2 <= c1; c2++) {
-                var gi = r * cols + c2;
-                if (!grid[gi]) grid[gi] = [];
-                grid[gi].push(i);
+            var x0 = (ax - bb[0]) / cell, y0 = (ay - bb[1]) / cell;
+            var x1 = (bx - bb[0]) / cell, y1 = (by - bb[1]) / cell;
+            var cx = Math.floor(x0), cy = Math.floor(y0);
+            var ex = Math.floor(x1), ey = Math.floor(y1);
+            var dx = x1 - x0, dy = y1 - y0;
+            var stepX = dx > 0 ? 1 : -1, stepY = dy > 0 ? 1 : -1;
+            var tMaxX = 1e18, tMaxY = 1e18, tDeltaX = 1e18, tDeltaY = 1e18;
+            if (dx !== 0) { tDeltaX = Math.abs(1 / dx); tMaxX = (dx > 0 ? (cx + 1 - x0) : (x0 - cx)) * tDeltaX; }
+            if (dy !== 0) { tDeltaY = Math.abs(1 / dy); tMaxY = (dy > 0 ? (cy + 1 - y0) : (y0 - cy)) * tDeltaY; }
+            var guard = 0;
+            while (guard++ < 100000) {
+                if (cx >= 0 && cy >= 0 && cx < cols && cy < rows) {
+                    var gi = cy * cols + cx;
+                    if (!cellEdges[gi]) cellEdges[gi] = [];
+                    cellEdges[gi].push(ax, ay, bx, by);
+                }
+                if (cx === ex && cy === ey) break;
+                if (tMaxX < tMaxY) { cx += stepX; tMaxX += tDeltaX; }
+                else { cy += stepY; tMaxY += tDeltaY; }
             }
         }
-        return { bb: bb, cell: cell, cols: cols, rows: rows, polys: polys, boxes: boxes, grid: grid };
-    }
-    function pointInRegion(ix, x, y) {
-        if (!ix) return true;
-        if (x < ix.bb[0] || x > ix.bb[2] || y < ix.bb[1] || y > ix.bb[3]) return false;
-        var c = Math.floor((x - ix.bb[0]) / ix.cell), r = Math.floor((y - ix.bb[1]) / ix.cell);
-        if (c < 0) c = 0; if (c >= ix.cols) c = ix.cols - 1;
-        if (r < 0) r = 0; if (r >= ix.rows) r = ix.rows - 1;
-        var list = ix.grid[r * ix.cols + c];
-        if (!list) return false;
-        var inside = false;
-        for (var k = 0; k < list.length; k++) {
-            var pi = list[k], poly = ix.polys[pi], bx = ix.boxes[pi];
-            if (x < bx[0] || x > bx[2] || y < bx[1] || y > bx[3]) continue;
-            if (pointInPoly([x, y], poly)) inside = !inside;   // 偶数交叉: 孔洞自然挖掉
+        for (var p = 0; p < subs.length; p++) {
+            var pts = subs[p].entireSubPath, n = pts.length;
+            if (n < 3) continue;
+            for (var j = 0; j < n; j++) {
+                var a = pts[j].anchor, b = pts[(j + 1) % n].anchor;
+                addEdge(a[0], a[1], b[0], b[1]);
+            }
         }
-        return inside;
+        var par = new Array(cols * rows);
+        for (i = 0; i < par.length; i++) par[i] = 0;
+        for (var r2 = 0; r2 < rows; r2++) {
+            var segs = rowSegs[r2];
+            if (!segs || !segs.length) continue;
+            var yMid = bb[1] + (r2 + 0.5) * cell, xs = [];
+            for (var s = 0; s < segs.length; s += 4) {
+                var ay = segs[s + 1], by = segs[s + 3];
+                if ((ay <= yMid && by > yMid) || (by <= yMid && ay > yMid))
+                    xs.push(segs[s] + (yMid - ay) * (segs[s + 2] - segs[s]) / (by - ay));
+            }
+            if (!xs.length) continue;
+            xs.sort(function (m, n2) { return m - n2; });
+            var xi = 0, parity = 0;
+            for (var c = 0; c < cols; c++) {
+                var cxx = bb[0] + (c + 0.5) * cell;
+                while (xi < xs.length && xs[xi] < cxx) { parity ^= 1; xi++; }
+                par[r2 * cols + c] = parity;
+            }
+        }
+        var w = cols + 1, sat = new Array(w * (rows + 1));
+        for (i = 0; i < sat.length; i++) sat[i] = 0;
+        for (var r3 = 0; r3 < rows; r3++) {
+            var rowSum = 0;
+            for (var c3 = 0; c3 < cols; c3++) {
+                rowSum += cellEdges[r3 * cols + c3] ? 1 : 0;
+                sat[(r3 + 1) * w + (c3 + 1)] = sat[r3 * w + (c3 + 1)] + rowSum;
+            }
+        }
+        return { bb: bb, cell: cell, cols: cols, rows: rows, cellEdges: cellEdges, par: par, sat: sat, w: w };
     }
-    function filterPolysToRegion(polys, subs, stepPx) {
-        var ix = buildRegionIndex(subs, 64);
-        if (!ix) return { polys: polys, dropped: 0 };
+    function gridPointInside(G, x, y) {
+        var c = Math.floor((x - G.bb[0]) / G.cell), r = Math.floor((y - G.bb[1]) / G.cell);
+        if (c < 0 || r < 0 || c >= G.cols || r >= G.rows) return false;
+        var gi = r * G.cols + c;
+        var par = G.par[gi], edges = G.cellEdges[gi];
+        if (!edges) return par === 1;
+        var mx = G.bb[0] + (c + 0.5) * G.cell, my = G.bb[1] + (r + 0.5) * G.cell;
+        var crossings = 0;
+        for (var i = 0; i < edges.length; i += 4)
+            if (segIntersect(mx, my, x, y, edges[i], edges[i + 1], edges[i + 2], edges[i + 3])) crossings++;
+        return (par ^ (crossings & 1)) === 1;
+    }
+    /* 矩形是否完全在区域外: 只在"范围内没有任何线段格、且格心奇偶=外"时返回 true。
+     * 生成器用它跳过区域外的元素 —— 这些元素本来也会被裁剪丢弃, 输出完全一致。 */
+    function gridRectOutside(G, x0, y0, x1, y1) {
+        if (!G) return false;
+        if (x1 < G.bb[0] || y1 < G.bb[1] || x0 > G.bb[2] || y0 > G.bb[3]) return true;
+        var c0 = Math.floor((x0 - G.bb[0]) / G.cell), c1 = Math.floor((x1 - G.bb[0]) / G.cell);
+        var r0 = Math.floor((y0 - G.bb[1]) / G.cell), r1 = Math.floor((y1 - G.bb[1]) / G.cell);
+        if (c0 < 0) c0 = 0; if (c1 >= G.cols) c1 = G.cols - 1;
+        if (r0 < 0) r0 = 0; if (r1 >= G.rows) r1 = G.rows - 1;
+        if (c0 > c1 || r0 > r1) return true;
+        var s = G.sat, w = G.w;
+        var ec = s[(r1 + 1) * w + (c1 + 1)] - s[r0 * w + (c1 + 1)] - s[(r1 + 1) * w + c0] + s[r0 * w + c0];
+        if (ec > 0) return false;
+        return G.par[r0 * G.cols + c0] === 0;
+    }
+    function filterPolysToRegion(polys, subs, stepPx, gridOrCell) {
+        var bb0 = subsBBox(subs);
+        if (!bb0) return { polys: polys, dropped: 0 };
+        var G = (gridOrCell && gridOrCell.cellEdges) ? gridOrCell : null;
+        if (!G) {
+            var cellFine = (typeof gridOrCell === 'number' && gridOrCell > 0) ? gridOrCell
+                : Math.max(16, Math.ceil(Math.max(bb0[2] - bb0[0], bb0[3] - bb0[1]) / 256));
+            G = buildParityGrid(subs, cellFine);
+        }
+        if (!G) return { polys: polys, dropped: 0 };
         var step = Math.max(stepPx || 6, 2), out = [], dropped = 0;
+        var bb = G.bb, cell = G.cell, cols = G.cols, rows = G.rows;
         for (var i = 0; i < polys.length; i++) {
             var p = polys[i];
             if (!p || p.length < 3) { dropped++; continue; }
+            var px0, py0, px1, py1;
+            var pbb = p._bb;   // 生成器已知包围盒时直接用, 省掉逐点扫描(大层能省几百万次读取)
+            if (pbb) { px0 = pbb[0]; py0 = pbb[1]; px1 = pbb[2]; py1 = pbb[3]; }
+            else {
+                px0 = 1e18; py0 = 1e18; px1 = -1e18; py1 = -1e18;
+                for (var q = 0; q < p.length; q++) {
+                    var pt = p[q];
+                    if (pt[0] < px0) px0 = pt[0]; if (pt[0] > px1) px1 = pt[0];
+                    if (pt[1] < py0) py0 = pt[1]; if (pt[1] > py1) py1 = pt[1];
+                }
+            }
             var keep = false;
+            /* 快速路径: 包围盒完全落在区域 bbox 内、且范围内没有带线段的格子 → 整块同内外, 一次判定 */
+            if (px0 >= bb[0] && py0 >= bb[1] && px1 <= bb[2] && py1 <= bb[3]) {
+                var c0 = Math.floor((px0 - bb[0]) / cell), c1 = Math.floor((px1 - bb[0]) / cell);
+                var r0 = Math.floor((py0 - bb[1]) / cell), r1 = Math.floor((py1 - bb[1]) / cell);
+                if (c0 < 0) c0 = 0; if (c1 >= cols) c1 = cols - 1;
+                if (r0 < 0) r0 = 0; if (r1 >= rows) r1 = rows - 1;
+                var s0 = G.sat, w = G.w;
+                var ec = s0[(r1 + 1) * w + (c1 + 1)] - s0[r0 * w + (c1 + 1)] - s0[(r1 + 1) * w + c0] + s0[r0 * w + c0];
+                if (ec === 0) {
+                    if (G.par[r0 * cols + c0] === 1) out.push(p); else dropped++;
+                    continue;
+                }
+            }
             for (var j = 0; j < p.length && !keep; j++) {
                 var a = p[j], b2 = p[(j + 1) % p.length];
                 var dx = b2[0] - a[0], dy = b2[1] - a[1];
@@ -1983,7 +2119,7 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
                 var nSeg = Math.max(1, Math.ceil(len / step));
                 for (var s = 0; s <= nSeg; s++) {
                     var t = s / nSeg;
-                    if (pointInRegion(ix, a[0] + dx * t, a[1] + dy * t)) { keep = true; break; }
+                    if (gridPointInside(G, a[0] + dx * t, a[1] + dy * t)) { keep = true; break; }
                 }
             }
             if (keep) out.push(p); else dropped++;
@@ -2344,6 +2480,17 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
 
                 var polys;
                 stage = '生成纹样: ' + srcPath;
+                var tGen0 = new Date().getTime();
+                /* 区域奇偶网格只建一次: 生成阶段用它跳过区域外元素, 裁剪阶段直接复用。 */
+                var regionGrid = null;
+                if (pattern !== 'contour' && pattern !== 'topographic') {
+                    var mbG = subsBBox(maskSubs);
+                    if (mbG) {
+                        var cellG = Math.max(16, Math.ceil(Math.max(mbG[2] - mbG[0], mbG[3] - mbG[1]) / 256));
+                        regionGrid = buildParityGrid(maskSubs, cellG);
+                    }
+                    cfg.regionGrid = regionGrid;
+                }
                 if (pattern === 'content_flow' && !cfg.flowField) {
                     /* 随形流场需要画面分析: GUI 已分析过会带在 L.analysis 里, 否则现算一次 */
                     var anF = (L.analysis && L.analysis.field) ? L.analysis : analyzeLayer(src, layer, analysisReuse);
@@ -2381,19 +2528,21 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
                 else throw new Error(srcPath + ': 未知纹样 ' + pattern);
 
                 polys = normalizePolys(polys);   // 压到 Photoshop 单子路径 1000 点上限内
+                var tGen1 = new Date().getTime();
                 if (!polys.length) { log('NOLINES 区域过小未产生线, 跳过: ' + srcPath); continue; }
 
                 /* 只保留真正落在区域里的纹样(大 bbox + 稀疏内容时能省掉十几倍无用几何)。
                  * contour/topographic 本来就贴着区域轮廓生成, 跳过筛选避免误删。 */
                 if (pattern !== 'contour' && pattern !== 'topographic') {
-                    var filt = filterPolysToRegion(polys, maskSubs, cfg.linePx);
+                    var filt = filterPolysToRegion(polys, maskSubs, cfg.linePx, regionGrid);
                     if (filt.dropped) plog('区域裁剪: 纹样 ' + polys.length + ' -> ' + filt.polys.length + ' (丢掉区域外的 ' + filt.dropped + ' 条)');
                     polys = filt.polys;
                     if (!polys.length) { log('NOLINES 区域过小未产生线, 跳过: ' + srcPath); continue; }
                 }
+                var tFilt1 = new Date().getTime();
 
                 var plan = planShapeBatches(polys);
-                plog('纹样完成: 多边形 ' + polys.length + ' 节点 ' + plan.points);
+                plog('纹样完成: 多边形 ' + polys.length + ' 节点 ' + plan.points + ' ms(生成=' + (tGen1 - tGen0) + ' 裁剪=' + (tFilt1 - tGen1) + ')');
 
                 idx++;
                 var outName = sanitize(L.output_name || leafName(srcPath));
@@ -2639,6 +2788,13 @@ var ZG_CORE_VERSION = '2026-09-17d';   // 便于在 zg_progress.txt 里确认实
         genMoireRadial: genMoireRadial,
         genContentFlow: genContentFlow,
         computeFeatures: computeFeatures,
+        filterPolysToRegion: filterPolysToRegion,
+        buildParityGrid: buildParityGrid,
+        gridPointInside: gridPointInside,
+        genScale: genScale,
+        genDots: genDots,
+        circleRibbon: circleRibbon,
+        offsetPolyline: offsetPolyline,
         getRegionSubs: getRegionSubs,
         subsBBox: subsBBox,
         subsPxToPt: subsPxToPt,
