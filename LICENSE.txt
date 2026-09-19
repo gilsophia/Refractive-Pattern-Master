@@ -1,0 +1,65 @@
+折光纹工具箱 · Refraction Pattern Master
+版权所有 © 2026 gilsophia。保留所有权利。
+Copyright (C) 2026 gilsophia. All Rights Reserved.
+
+【中文许可条款】
+
+1. 授权范围
+   版权人仅授权你在本人（或你所在团队内部）的创作工作中使用本工具，并使用本工具
+   生成的成品（折光纹母版 PSD、图案等）。生成的成品可用于个人及商业项目，无需另行
+   付费或署名。
+
+2. 禁止二次修改（不可二改）
+   不得对本工具的源代码、打包文件、内置纹样库（算法、参数与数据）、界面与文档
+   进行任何形式的修改、反编译、反汇编、破解、拆分、再封装、翻译或衍生创作，
+   也不得移除或改动本工具中的版权声明、水印与许可信息。
+
+3. 禁止二次分发（不可二传）
+   不得以任何形式复制、出售、出租、出借、转让、发布、上传、共享或再分发本工具的
+   全部或部分（包括但不限于源代码、打包文件、纹样库、界面、文档、预览图、品牌素材），
+   无论是否收费、是否经过修改。
+
+4. 分发例外
+   如确需对外分发，必须事先取得版权人的书面许可。
+
+5. 免责声明
+   本工具按"现状"提供，不附带任何明示或默示的担保（包括但不限于适销性、特定用途
+   适用性与无侵权的担保）。因使用或无法使用本工具而产生的任何直接、间接、附带或
+   后果性损失，版权人均不承担责任。
+
+6. 权利保留
+   本许可未明确授予的一切权利均归版权人所有。违反本许可任一条款，授权即自动终止，
+   你必须立即停止使用并销毁本工具的全部副本。
+
+【English License】
+
+1. Grant. You are granted a non-exclusive, non-transferable right to use this tool
+   for your own creative work (or within your own team) and to use the outputs
+   generated with it (refraction master PSDs and patterns) in personal and
+   commercial projects, free of charge and without attribution.
+
+2. No Modification. You may not modify, reverse engineer, decompile, disassemble,
+   crack, split, repackage, translate, or create derivative works of the software,
+   its source code, packaged files, built-in pattern library (algorithms, parameters
+   and data), user interface, documentation or branding assets. You may not remove
+   or alter any copyright notice, watermark or license information.
+
+3. No Redistribution. You may not copy, sell, rent, lend, transfer, publish, upload,
+   share or redistribute all or any part of this tool (including but not limited to
+   source code, packaged files, pattern library, UI, documentation, preview images
+   and branding assets), with or without modification, for free or for payment.
+
+4. Exception. Any distribution requires prior written permission from the copyright
+   holder.
+
+5. Disclaimer. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHOR
+   BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM, OUT OF OR IN
+   CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+6. Reservation. All rights not expressly granted are reserved. Any violation of this
+   license automatically terminates your rights; you must immediately stop using the
+   tool and destroy all copies.
+
+—— 如对本许可有疑问或需取得分发许可，请联系版权人。

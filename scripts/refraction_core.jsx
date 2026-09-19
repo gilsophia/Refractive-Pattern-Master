@@ -2,7 +2,7 @@
  * 由 generate_refraction.jsx (job.json 模式) 与 generate_refraction_gui.jsx (手动分配模式) 通过 $.evalFile 共用。
  * 不包含 UI 与 JSON 解析, 只暴露 ZG.generate / ZG.collectLayers 等。 */
 var ZG = {};
-var ZG_CORE_VERSION = '2026-09-18a';   // 便于在 zg_progress.txt 里确认实际运行的版本
+var ZG_CORE_VERSION = '2026-09-18c';   // 便于在 zg_progress.txt 里确认实际运行的版本
 
 (function () {
     var c = charIDToTypeID, s = stringIDToTypeID;
@@ -856,15 +856,18 @@ var ZG_CORE_VERSION = '2026-09-18a';   // 便于在 zg_progress.txt 里确认实
         if (w <= 0 || h <= 0 || off + w * h * (bpp / 8) > s.length + 4) return null;
         var bpr = (((w * bpp / 8) + 3) >> 2) << 2;
         var lum = new Array(w * h), alpha = (bpp === 32) ? new Array(w * h) : null;
+        var rgb = new Array(w * h);   // 打包 r<<16|g<<8|b, 内容拆分用
         for (var y = 0; y < h; y++) {
             var row = off + (topDown ? y : (h - 1 - y)) * bpr;
             for (var x = 0; x < w; x++) {
                 var p = row + x * (bpp / 8), i = y * w + x;
-                lum[i] = (u8(p + 2) * 299 + u8(p + 1) * 587 + u8(p) * 114) / 1000;
+                var rr = u8(p + 2), gg = u8(p + 1), bb = u8(p);
+                lum[i] = (rr * 299 + gg * 587 + bb * 114) / 1000;
+                rgb[i] = (rr << 16) | (gg << 8) | bb;
                 if (alpha) alpha[i] = u8(p + 3);
             }
         }
-        return { w: w, h: h, lum: lum, alpha: alpha };
+        return { w: w, h: h, lum: lum, alpha: alpha, rgb: rgb };
     }
     function computeFeatures(img) {
         var w = img.w, h = img.h, lum = img.lum, alpha = img.alpha, n = w * h;
@@ -1054,6 +1057,480 @@ var ZG_CORE_VERSION = '2026-09-18a';   // 便于在 zg_progress.txt 里确认实
         return out;
     }
 
+    /* ================= 内容拆分 (实验性, 0.3) =================
+     * 把大图层按画面内容拆成若干命名子层: 白底渲染到小图 → 颜色聚类 → 同色连通域 →
+     * 区域特征(颜色/位置/细线/纹理) → 规则归类 → 掩码放大回全分辨率 → 在原图层下建子层。
+     * 纯启发式(不是 AI 语义分割), 结果需要人工复核; 调用方应先另存源文件副本。 */
+    function renderLayerSmallRGB(srcDoc, layer, reuse, longSide) {
+        var prevDoc = app.activeDocument, oldUnits = app.preferences.rulerUnits;
+        var out = { ok: false };
+        try {
+            app.preferences.rulerUnits = Units.PIXELS;
+            var W = srcDoc.width.as('px'), H = srcDoc.height.as('px');
+            var doc = (reuse && reuse.doc) ? reuse.doc : null;
+            if (!doc) {
+                doc = app.documents.add(srcDoc.width, srcDoc.height, srcDoc.resolution, 'ZG_split_sample', NewDocumentMode.RGB, DocumentFill.TRANSPARENT);
+                if (reuse) reuse.doc = doc;
+            } else {
+                app.activeDocument = doc;
+                if (Math.round(doc.width.as('px')) !== Math.round(W) || Math.round(doc.height.as('px')) !== Math.round(H))
+                    doc.resizeImage(W, H, doc.resolution, ResampleMethod.BILINEAR);
+            }
+            app.activeDocument = doc;
+            var base = resetTempDoc(doc);
+            if (!base) throw new Error('拆分分析文档复位失败');
+            /* 不加白底: 透明底渲染能保留 Screen/Lighten 等混合模式的真实观感
+             * (白底会把这类内容洗成白色); 存 24 位 BMP 时透明区自然压成白。 */
+            app.activeDocument = srcDoc;
+            var dup = layer.duplicate(doc, ElementPlacement.PLACEATBEGINNING);
+            app.activeDocument = doc;
+            dup.visible = true;
+            /* "合并可见图层"在可见层不足 2 个/活动层异常时不可用(会弹错误框), 先数可见层再合并 */
+            var visN = 0;
+            for (var vi = 0; vi < doc.layers.length; vi++) if (doc.layers[vi].visible) visN++;
+            if (visN >= 2) { try { doc.mergeVisibleLayers(); } catch (eM) {} }
+            var longSide0 = Math.max(W, H), sc = (longSide || 176) / longSide0;
+            var aw = Math.max(8, Math.round(W * sc)), ah = Math.max(8, Math.round(H * sc));
+            doc.resizeImage(aw, ah, doc.resolution, ResampleMethod.BILINEAR);
+            var bmp = new File(Folder.temp.fsName + '/ZG_split_' + String(new Date().getTime()) + '.bmp');
+            var opts = new BMPSaveOptions();
+            opts.alphaChannels = false;
+            try { opts.depth = BMPDepthType.TWENTYFOUR; } catch (eD) {}
+            opts.rleCompression = false; opts.flipRowOrder = false;
+            doc.saveAs(bmp, opts, true);
+            var img = readBMP(bmp);
+            try { bmp.remove(); } catch (eR) {}
+            doc.resizeImage(W, H, doc.resolution, ResampleMethod.BILINEAR);
+            if (img) {
+                img.scale = W / aw;
+                img.srcW = W; img.srcH = H;
+                out = img; out.ok = true;
+            }
+        } catch (e) {
+            out.ok = false; out.err = (e && e.message) ? e.message : String(e);
+        } finally {
+            try { app.activeDocument = prevDoc; } catch (eF) {}
+            app.preferences.rulerUnits = oldUnits;
+        }
+        return out;
+    }
+    /* 小图上跑 k-means(样本子集), 返回扁平中心 {cr,cg,cb,k}(避免 centers[c][0] 的慢访问) */
+    function kmeansSmall(rgb, n, k, iters, seed) {
+        var samples = [], step = Math.max(1, Math.floor(n / 3000));
+        for (var i = 0; i < n; i += step) samples.push(rgb[i]);
+        if (samples.length < k) return null;
+        var sr = [], sg = [], sb = [];
+        for (i = 0; i < samples.length; i++) {
+            sr.push((samples[i] >> 16) & 255); sg.push((samples[i] >> 8) & 255); sb.push(samples[i] & 255);
+        }
+        var ns = sr.length;
+        var cr = [], cg = [], cb = [];
+        for (i = 0; i < k; i++) {
+            var idx = Math.floor(ns * (i + 0.5) / k);
+            cr.push(sr[idx]); cg.push(sg[idx]); cb.push(sb[idx]);
+        }
+        for (var it = 0; it < (iters || 8); it++) {
+            var ar = [], ag = [], ab = [], ac = [];
+            for (i = 0; i < k; i++) { ar.push(0); ag.push(0); ab.push(0); ac.push(0); }
+            for (i = 0; i < ns; i++) {
+                var best = 0, bd = 1e18, r0 = sr[i], g0 = sg[i], b0 = sb[i];
+                for (var c2 = 0; c2 < k; c2++) {
+                    var dr = r0 - cr[c2], dg = g0 - cg[c2], db = b0 - cb[c2];
+                    var d2 = dr * dr + dg * dg + db * db;
+                    if (d2 < bd) { bd = d2; best = c2; }
+                }
+                ar[best] += r0; ag[best] += g0; ab[best] += b0; ac[best]++;
+            }
+            for (c2 = 0; c2 < k; c2++) {
+                if (ac[c2]) { cr[c2] = ar[c2] / ac[c2]; cg[c2] = ag[c2] / ac[c2]; cb[c2] = ab[c2] / ac[c2]; }
+            }
+        }
+        for (i = 0; i < k; i++) { cr[i] = Math.round(cr[i]); cg[i] = Math.round(cg[i]); cb[i] = Math.round(cb[i]); }
+        return { cr: cr, cg: cg, cb: cb, k: k };
+    }
+    /* 逐像素归类 + 同色连通域; 只处理内容像素(近白视为背景)。量化色缓存避免重复算距离。 */
+    function buildParts(img, centers, minArea) {
+        var w = img.w, h = img.h, rgb = img.rgb, n = w * h;
+        var cr = centers.cr, cg = centers.cg, cb = centers.cb, k = centers.k;
+        var labels = new Array(n);
+        /* 量化色(5bit/通道, 32768 项)缓存: 值存 label+1 以便用 undefined 判定未命中。
+         * 关键: ExtendScript 中数组元素超过 ~10 万后读写会灾难性变慢(实测 262k 读一次要 1ms),
+         * 所以这里绝不能用 6bit(262144 项), 5bit 的 32768 项是安全上限。 */
+        var cache = new Array(32768);
+        for (var i = 0; i < n; i++) {
+            var p = rgb[i], r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
+            if (r >= 250 && g >= 250 && b >= 250) { labels[i] = -1; continue; }
+            var key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+            var lab = cache[key];
+            if (lab === undefined) {
+                var best = 0, bd = 1e18;
+                for (var c2 = 0; c2 < k; c2++) {
+                    var dr = r - cr[c2], dg = g - cg[c2], db = b - cb[c2];
+                    var d2 = dr * dr + dg * dg + db * db;
+                    if (d2 < bd) { bd = d2; best = c2; }
+                }
+                lab = cache[key] = best + 1;
+            }
+            labels[i] = lab - 1;
+        }
+        /* 同色连通域: 并查集(只查左/上邻居, 4 邻接)。避免显式栈 push/pop 在 ExtendScript 的性能坑 */
+        var parent = new Array(n);
+        for (i = 0; i < n; i++) parent[i] = i;
+        for (i = 0; i < n; i++) {
+            var li = labels[i];
+            if (li < 0) continue;
+            var xi = i % w;
+            if (xi > 0 && labels[i - 1] === li) {
+                var a1 = i; while (parent[a1] !== a1) { parent[a1] = parent[parent[a1]]; a1 = parent[a1]; }
+                var b1 = i - 1; while (parent[b1] !== b1) { parent[b1] = parent[parent[b1]]; b1 = parent[b1]; }
+                if (a1 !== b1) parent[a1] = b1;
+            }
+            if (i >= w && labels[i - w] === li) {
+                var a2 = i; while (parent[a2] !== a2) { parent[a2] = parent[parent[a2]]; a2 = parent[a2]; }
+                var b2 = i - w; while (parent[b2] !== b2) { parent[b2] = parent[parent[b2]]; b2 = parent[b2]; }
+                if (a2 !== b2) parent[a2] = b2;
+            }
+        }
+        /* 以根为索引统计面积/质心/bbox(平行数组, 根的最大值 < n)。
+         * 颜色直接用所属聚类的中心色(同区域同标签), 省掉每像素 3 次颜色求和 */
+        var rArea = new Array(n), rSx = new Array(n), rSy = new Array(n);
+        var rX0 = new Array(n), rY0 = new Array(n), rX1 = new Array(n), rY1 = new Array(n);
+        for (i = 0; i < n; i++) { rArea[i] = 0; rSx[i] = 0; rSy[i] = 0; }
+        var comp = new Array(n);
+        for (i = 0; i < n; i++) {
+            var li2 = labels[i];
+            if (li2 < 0) { comp[i] = -1; continue; }
+            var rt = i; while (parent[rt] !== rt) { parent[rt] = parent[parent[rt]]; rt = parent[rt]; }
+            comp[i] = rt;
+            var xi2 = i % w, yi2 = (i - xi2) / w;
+            if (!rArea[rt]) { rX0[rt] = xi2; rX1[rt] = xi2; rY0[rt] = yi2; rY1[rt] = yi2; }
+            else {
+                if (xi2 < rX0[rt]) rX0[rt] = xi2; if (xi2 > rX1[rt]) rX1[rt] = xi2;
+                if (yi2 < rY0[rt]) rY0[rt] = yi2; if (yi2 > rY1[rt]) rY1[rt] = yi2;
+            }
+            rArea[rt]++; rSx[rt] += xi2; rSy[rt] += yi2;
+        }
+        var regions = [], minA = (minArea || 8);
+        for (i = 0; i < n; i++) {
+            if (!rArea[i] || rArea[i] < minA) continue;
+            var lb = labels[i];
+            regions.push({ id: i, label: lb, area: rArea[i], x0: rX0[i], y0: rY0[i], x1: rX1[i], y1: rY1[i], r: cr[lb], g: cg[lb], b: cb[lb] });
+        }
+        return { labels: labels, comp: comp, regions: regions, maxId: n - 1 };
+    }
+    function rgb2hsv(r, g, b) {
+        r /= 255; g /= 255; b /= 255;
+        var mx = Math.max(r, Math.max(g, b)), mn = Math.min(r, Math.min(g, b));
+        var d = mx - mn, hh = 0;
+        if (d > 1e-6) {
+            if (mx === r) hh = ((g - b) / d) % 6;
+            else if (mx === g) hh = (b - r) / d + 2;
+            else hh = (r - g) / d + 4;
+            hh *= 60; if (hh < 0) hh += 360;
+        }
+        return { h: hh, s: mx > 1e-6 ? d / mx : 0, v: mx };
+    }
+    /* 区域特征 → 规则归类。mode: 'auto'|'character'|'scenery'|'interior'
+     * 纯启发式: 颜色(HSV)+位置+面积+长宽比+细线(腐蚀消失率)+纹理(平均梯度)。 */
+    function classifyParts(img, parts, mode) {
+        var w = img.w, h = img.h, n = w * h, rgb = img.rgb, comp = parts.comp;
+        var i, contentN = 0;
+        var isContent = new Array(n), lum = new Array(n);
+        for (i = 0; i < n; i++) {
+            var p = rgb[i], r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
+            var on = (r < 250 || g < 250 || b < 250) ? 1 : 0;
+            isContent[i] = on; if (on) contentN++;
+            lum[i] = (r * 299 + g * 587 + b * 114) / 1000;
+        }
+        /* 每区域统计(平行数组, 避免逐像素的对象属性访问): 面积/质心/梯度/腐蚀存活。
+         * 梯度在此就地计算(不再单独扫一遍) */
+        var maxId = parts.maxId || 0;
+        var rArea = new Array(maxId + 1), rSx = new Array(maxId + 1), rSy = new Array(maxId + 1), rG = new Array(maxId + 1), rSv = new Array(maxId + 1);
+        for (i = 0; i <= maxId; i++) { rArea[i] = 0; rSx[i] = 0; rSy[i] = 0; rG[i] = 0; rSv[i] = 0; }
+        for (i = 0; i < n; i++) {
+            var c = comp[i];
+            if (c < 0) continue;
+            var x2 = i % w, y2 = (i - x2) / w;
+            var gx = 0, gy = 0;
+            if (x2 > 0 && x2 < w - 1) gx = lum[i + 1] - lum[i - 1];
+            if (y2 > 0 && y2 < h - 1) gy = lum[i + w] - lum[i - w];
+            rArea[c]++; rSx[c] += x2; rSy[c] += y2; rG[c] += (Math.abs(gx) + Math.abs(gy)) / 2;
+            /* 4 邻域腐蚀存活(细线判定足够, 比 3x3 快一倍) */
+            if (x2 > 0 && y2 > 0 && x2 < w - 1 && y2 < h - 1 &&
+                comp[i - 1] === c && comp[i + 1] === c && comp[i - w] === c && comp[i + w] === c) rSv[c]++;
+        }
+        var st = new Array(maxId + 1);
+        for (var ri0 = 0; ri0 < parts.regions.length; ri0++) {
+            var id0 = parts.regions[ri0].id;
+            st[id0] = { area: rArea[id0], sx: rSx[id0], sy: rSy[id0], gsum: rG[id0], survive: rSv[id0] };
+        }
+        /* 脸锚点: 上半部、尺寸合理的皮肤色区域中取"最大"者。
+         * 位置/大小限制可排除线稿层里偶然出现的肉色小块(它们会让整层误判为人物) */
+        var faceReg = null, faceBest = 0;
+        for (var ri = 0; ri < parts.regions.length; ri++) {
+            var rg = parts.regions[ri], s = st[rg.id];
+            var hv = rgb2hsv(rg.r, rg.g, rg.b);
+            var fr0 = s.area / contentN;
+            var isSkin = rg.r > rg.g && rg.g > rg.b && (rg.r - rg.b) > 28 && (rg.r - rg.b) < 95 &&
+                hv.v > 0.72 && hv.v < 0.92 && hv.s > 0.15 && hv.s < 0.4 && hv.h > 3 && hv.h < 52;
+            if (!isSkin || fr0 < 0.002 || fr0 > 0.12) continue;
+            if ((s.sy / s.area) / h > 0.5) continue;             // 脸一般在上半部
+            var aspF = (rg.x1 - rg.x0 + 1) / (rg.y1 - rg.y0 + 1);
+            if (aspF < 0.45 || aspF > 1.8) continue;             // 脸大致是方的(排除细长的"岩石/木纹")
+            if (s.area > faceBest) { faceBest = s.area; faceReg = rg; }
+        }
+        var useChar = (mode === 'character') || ((mode === 'auto' || !mode) && !!faceReg);
+        var head = null, faceCx = 0, faceW = 1, headFW = 1, headFH = 1;
+        if (useChar) {
+            var fw = faceReg.x1 - faceReg.x0, fh = faceReg.y1 - faceReg.y0;
+            head = {
+                x0: faceReg.x0 - 0.6 * fw, x1: faceReg.x1 + 0.6 * fw,
+                y0: faceReg.y0 - 1.6 * fh, y1: faceReg.y1 + 0.25 * fh,
+                fy1: faceReg.y1
+            };
+            headFW = Math.max(3, fw); headFH = Math.max(3, fh);
+            faceCx = (faceReg.x0 + faceReg.x1) / 2; faceW = Math.max(6, fw);
+        }
+        function classify(rg, s) {
+            var frac = s.area / contentN;
+            var cxPx = s.sx / s.area, cyPx = s.sy / s.area;
+            var cx = cxPx / w, cy = cyPx / h;
+            var aspect = (rg.x1 - rg.x0 + 1) / (rg.y1 - rg.y0 + 1);
+            var hv = rgb2hsv(rg.r, rg.g, rg.b);
+            var thin = 1 - s.survive / s.area, tex = s.gsum / s.area;
+            var isDark = hv.v < 0.35, isLight = hv.v > 0.75;
+            var isGray = hv.s < 0.12;
+            var isBlue = hv.h > 185 && hv.h < 270 && hv.s > 0.12;
+            var isGreen = hv.h > 70 && hv.h < 175 && hv.s > 0.15;
+            var isGold = hv.h > 30 && hv.h < 62 && hv.s > 0.5 && hv.v > 0.72;
+            var isBrown = hv.h > 8 && hv.h < 48 && hv.s > 0.16 && hv.v > 0.12 && hv.v < 0.9;
+            /* 皮肤: 偏亮、低-中饱和的暖色(太暗/太饱和的棕黄布料不算, 近白的高光也不当皮肤) */
+            var isSkin = rg.r > rg.g && rg.g > rg.b && (rg.r - rg.b) > 28 && (rg.r - rg.b) < 95 &&
+                hv.v > 0.72 && hv.v < 0.92 && hv.s > 0.15 && hv.s < 0.4 && hv.h > 3 && hv.h < 52;
+            /* 金色/米黄的木料-墙板(室内常见): 别当成垫子 */
+            var isTanPanel = hv.h > 20 && hv.h < 55 && hv.s > 0.25 && hv.v > 0.5;
+            var inHead = head && cxPx >= head.x0 && cxPx <= head.x1 && cyPx >= head.y0 && cyPx <= head.y1;
+            /* 身体走廊: 离脸太远的"肤色/布料"区域多半是背景装饰, 不算人物 */
+            var inBody = true;
+            if (head) {
+                var ex0 = head.x0 - 1.9 * headFW, ex1 = head.x1 + 1.9 * headFW;
+                var ey1 = faceReg.y1 + 3.5 * headFH;
+                inBody = (rg.x1 >= ex0 && rg.x0 <= ex1 && rg.y0 <= ey1);
+            }
+            /* 脸部/头发/线稿在人物与场景模式下都适用(场景里也可能有人) */
+            if (thin > 0.85 && frac < 0.1) return '轮廓线稿';               // 极细的线(不论明暗, 浅色线稿也算)
+            if (thin > 0.72 && isDark && frac < 0.1) return '轮廓线稿';     // 较粗但很深的线
+            if (isSkin && inHead && frac > 0.0015) return '脸部';
+            if (isSkin && !inHead && inBody && frac > 0.15) return '衣物';           // 头部以下的整块肤色多半是肤色布料
+            if (isSkin && !inHead && inBody && frac > 0.0015) return useChar ? '皮肤' : '其他';
+            if (inHead && !isSkin && (isDark || isBrown) && frac > 0.006) return '头发';
+            if (useChar) {
+                if ((isGold || (hv.s > 0.6 && hv.v > 0.6)) && !isBlue && frac < 0.05) return '珠宝装饰';
+                if (frac > 0.02 && inBody && (!head || cyPx > head.y0)) return '衣物';   // 头部以下、身体范围内的块算衣物
+                /* 人物层里没归类的区域继续走景色/室内规则(画面里可能同时有背景) */
+            }
+            /* 云: 上半部的浅色低饱和低纹理大块(紧邻天空; 天空本身更蓝更饱和)。
+             * 必须放在"墙面"之前, 否则白云带会被墙面规则先吃掉 */
+            if (mode !== 'interior' && cy < 0.5 && hv.v > 0.72 && hv.s < 0.16 && tex < 10 && frac > 0.02 && aspect > 1.1) return '云';
+            /* 墙面板(室内外通用: 大块低纹理的灰/米黄) */
+            if (cy < 0.8 && (isGray || isTanPanel) && tex < 20 && frac > 0.04) return '墙面';
+            if (mode === 'interior') {
+                if (isBrown && hv.v > 0.3 && hv.v < 0.78 && cy > 0.1 && cy < 0.9 && frac > 0.02 && frac < 0.2 && aspect < 1.6 && tex < 25) return '书架';
+                if (cy > 0.7 && tex > 18 && frac > 0.012) return '地毯';
+                if (cy > 0.55 && frac > 0.05) return '地面';
+                if (aspect < 0.35 && hv.v > 0.45 && frac > 0.005) return '廊柱';
+                if (hv.s > 0.25 && hv.v > 0.45 && frac > 0.004 && frac < 0.06 && aspect > 0.4 && aspect < 2.4 &&
+                    tex < 22 && !isBlue && !isTanPanel) return '垫子';
+                if (frac > 0.12) return '建筑';
+                return '其他';
+            }
+            /* 景色(含 auto 无脸时)。书架/垫子/地毯是室内物件, 只在室内模式判定, 避免户外误分 */
+            if (isBlue && frac > 0.015) return cy < 0.45 ? '天空' : '水面';
+            /* 云: 上半部的浅色低饱和低纹理大块(常紧邻天空; 天空本身更蓝更饱和) */
+            if (cy < 0.5 && hv.v > 0.72 && hv.s < 0.16 && tex < 10 && frac > 0.02 && aspect > 1.1) return '云';
+            if (cy < 0.28 && hv.v > 0.85 && hv.s < 0.12 && tex < 20 && frac > 0.015) return '天空';
+            if (isGreen && frac > 0.03) return '森林';
+            if (hv.s < 0.22 && hv.v > 0.3 && hv.v < 0.85 && cy > 0.08 && cy < 0.8 && frac > 0.025 && tex < 18) return '山脉';
+            if (cy > 0.55 && frac > 0.05 && (isDark || isBrown || isGray)) return '地面';
+            if (aspect < 0.35 && hv.v > 0.45 && frac > 0.005) return '廊柱';
+            if (frac > 0.12) return '建筑';
+            return '其他';
+        }
+        /* 归类 + 合并同类掩码 */
+        var out = [], idx = {}, nameById = {}, ri;
+        for (ri = 0; ri < parts.regions.length; ri++) {
+            var rg2 = parts.regions[ri], s2 = st[rg2.id];
+            var name = classify(rg2, s2);
+            nameById[rg2.id] = name;
+            var rec = idx[name];
+            if (!rec) { rec = idx[name] = { name: name, area: 0, mask: new Array(n) }; out.push(rec); }
+            rec.area += s2.area;
+        }
+        for (var pi = 0; pi < n; pi++) {
+            var cid = comp[pi];
+            if (cid < 0) continue;
+            var nm = nameById[cid];
+            if (!nm) continue;
+            idx[nm].mask[pi] = 1;
+        }
+        var res = [];
+        for (ri = 0; ri < out.length; ri++) {
+            res.push({ name: out[ri].name, area: out[ri].area, frac: out[ri].area / contentN, mask: out[ri].mask });
+        }
+        res.sort(function (a, b) { return b.area - a.area; });
+        /* 调参用: 前 25 个区域的明细(面积占比/质心/颜色/HSV/纹理/细线率/长宽比) */
+        var dbg = [];
+        for (ri = 0; ri < parts.regions.length; ri++) {
+            var r5 = parts.regions[ri], s5 = st[r5.id];
+            dbg.push({ name: nameById[r5.id], frac: s5.area / contentN,
+                cx: (s5.sx / s5.area) / w, cy: (s5.sy / s5.area) / h,
+                r: Math.round(r5.r), g: Math.round(r5.g), b: Math.round(r5.b),
+                h: Math.round(rgb2hsv(r5.r, r5.g, r5.b).h), s: +rgb2hsv(r5.r, r5.g, r5.b).s.toFixed(2), v: +rgb2hsv(r5.r, r5.g, r5.b).v.toFixed(2),
+                tex: +((s5.gsum / s5.area)).toFixed(1), thin: +(1 - s5.survive / s5.area).toFixed(2),
+                asp: +((r5.x1 - r5.x0 + 1) / (r5.y1 - r5.y0 + 1)).toFixed(2) });
+        }
+        dbg.sort(function (a, b) { return b.frac - a.frac; });
+        return { parts: res, contentN: contentN, useChar: useChar, face: faceReg ? { x0: faceReg.x0, y0: faceReg.y0, x1: faceReg.x1, y1: faceReg.y1 } : null, w: w, h: h, debug: dbg.slice(0, 25) };
+    }
+    /* 24 位 BMP 写入: 白形状 + 黑底(PS 打开后 载入通道=白形状选区)。
+     * 注意: ExtendScript 里字符串 += 与 fromCharCode.apply 都很慢, 这里按"行程"拼行 + join 汇总 */
+    function writeMaskBMP(f, w, h, mask) {
+        var bpr = (((w * 3) + 3) >> 2) << 2, size = 54 + bpr * h;
+        function b4s(v) { return String.fromCharCode(v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) & 255); }
+        function b2s(v) { return String.fromCharCode(v & 255, (v >> 8) & 255); }
+        function rep(ch, n) { if (n <= 0) return ''; var s = ch; while (s.length < n) s += s; return s.substr(0, n); }
+        var head = 'BM' + b4s(size) + b2s(0) + b2s(0) + b4s(54) +
+            b4s(40) + b4s(w) + b4s(h) + b2s(1) + b2s(24) + b4s(0) + b4s(bpr * h) + b4s(2835) + b4s(2835) + b4s(0) + b4s(0);
+        var z3 = '\x00\x00\x00', w3 = '\xFF\xFF\xFF', pad = rep('\x00', bpr - w * 3);
+        var rows = [head];
+        for (var y = h - 1; y >= 0; y--) {
+            var base2 = y * w, x = 0, rowS = '';
+            while (x < w) {
+                var v = mask[base2 + x] ? 1 : 0, x2 = x + 1;
+                while (x2 < w && (mask[base2 + x2] ? 1 : 0) === v) x2++;
+                rowS += rep(v ? w3 : z3, (x2 - x) * 3);
+                x = x2;
+            }
+            rows.push(rowS + pad);
+        }
+        var s = rows.join('');
+        try { f.encoding = 'BINARY'; } catch (eE) {}
+        if (!f.open('w')) return false;
+        f.write(s);
+        f.close();
+        return true;
+    }
+    /* 把图层/组移进目标组(PS 2020 的 INSIDE 不可用, 走"临时图层 PLACEBEFORE"绕行) */
+    function moveIntoGroup(doc, item, grp) {
+        var before = grp.artLayers.length + grp.layerSets.length;
+        try {
+            var dummy = doc.artLayers.add();
+            dummy.name = 'ZG_temp_split';
+            try { dummy.move(grp, ElementPlacement.INSIDE); } catch (e1) {}
+            item.move(dummy, ElementPlacement.PLACEBEFORE);
+            try { dummy.remove(); } catch (e2) {}
+        } catch (e3) { return false; }
+        return (grp.artLayers.length + grp.layerSets.length) >= before + 1;
+    }
+    /* 完整拆分(实验性): 分析 → 写掩码 → 在源文档里建子层, 原层变组+隐藏备份。
+     * 外层负责关闭交互对话框: 渲染/合并等命令在个别状态下会弹错误框卡住流程。 */
+    function splitLayer(srcDoc, layer, reuse, opts) {
+        var oldDialogs = app.displayDialogs;
+        try { app.displayDialogs = DialogModes.NO; } catch (eD0) {}
+        try {
+            return splitLayerInner(srcDoc, layer, reuse, opts);
+        } finally {
+            try { app.displayDialogs = oldDialogs; } catch (eD1) {}
+        }
+    }
+    function splitLayerInner(srcDoc, layer, reuse, opts) {
+        opts = opts || {};
+        var t0 = new Date().getTime(), tA = t0;
+        var ms = {};
+        function tick(k) { var now = new Date().getTime(); ms[k] = now - tA; tA = now; }
+        var img = renderLayerSmallRGB(srcDoc, layer, reuse, opts.longSide || 256);
+        if (!img.ok) return { ok: false, err: img.err || '渲染失败' };
+        tick('render');
+        var centers = kmeansSmall(img.rgb, img.w * img.h, opts.k || 10, 8);
+        if (!centers) return { ok: false, err: '像素太少' };
+        tick('cluster');
+        var parts = buildParts(img, centers, 8);
+        tick('regions');
+        var cls = classifyParts(img, parts, opts.mode || 'auto');
+        tick('classify');
+        var clsList = [];
+        for (var cli = 0; cli < cls.parts.length; cli++) clsList.push({ name: cls.parts[cli].name, frac: cls.parts[cli].frac });
+        var W = img.srcW, H = img.srcH;
+        var minFrac = (typeof opts.minClassFrac === 'number') ? opts.minClassFrac : 0.004;
+        var subs = [], made = [], errors = [];
+        var maskMs = {};
+        function mTick(k, t) { maskMs[k] = (maskMs[k] || 0) + (new Date().getTime() - t); }
+        for (var ci = 0; ci < cls.parts.length; ci++) {
+            var cl = cls.parts[ci];
+            if (cl.frac < minFrac) continue;
+            var mf = new File(Folder.temp.fsName + '/ZG_splitmask_' + ci + '_' + String(new Date().getTime()) + '.bmp');
+            var tS = new Date().getTime();
+            if (!writeMaskBMP(mf, img.w, img.h, cl.mask)) { errors.push(cl.name + ': 掩码写出失败'); continue; }
+            mTick('写BMP', tS);
+            try {
+                var stage2 = '打开掩码';
+                tS = new Date().getTime();
+                var md = app.open(mf);
+                mTick('开图', tS); tS = new Date().getTime();
+                stage2 = '放大掩码'; md.resizeImage(W, H, md.resolution, ResampleMethod.BILINEAR);
+                mTick('放大', tS); tS = new Date().getTime();
+                stage2 = '复制掩码'; md.selection.selectAll(); md.selection.copy();
+                mTick('复制', tS); tS = new Date().getTime();
+                md.close(SaveOptions.DONOTSAVECHANGES);
+                mTick('关图', tS); tS = new Date().getTime();
+                stage2 = '切回源文档'; app.activeDocument = srcDoc;
+                stage2 = '建通道'; var ch = srcDoc.channels.add();
+                mTick('建通道', tS); tS = new Date().getTime();
+                stage2 = '粘贴到通道'; srcDoc.activeChannels = [ch]; srcDoc.paste();
+                mTick('粘贴', tS); tS = new Date().getTime();
+                stage2 = '回到RGB'; srcDoc.activeChannels = [srcDoc.channels[0], srcDoc.channels[1], srcDoc.channels[2]];
+                mTick('回RGB', tS); tS = new Date().getTime();
+                stage2 = '载入选区'; srcDoc.selection.load(ch, SelectionType.REPLACE);
+                mTick('载入选区', tS); tS = new Date().getTime();
+                stage2 = '删通道'; try { ch.remove(); } catch (eC) {}
+                mTick('删通道', tS); tS = new Date().getTime();
+                stage2 = '复制层'; var sub = layer.duplicate();
+                sub.name = cl.name;
+                mTick('复制层', tS); tS = new Date().getTime();
+                stage2 = '反选'; srcDoc.activeLayer = sub; srcDoc.selection.invert();
+                mTick('反选', tS); tS = new Date().getTime();
+                /* 清除选区像素: ArtLayer.clear() 会整层清空(不理会选区), 必须用 编辑→剪切 */
+                stage2 = '剪切'; executeAction(c('cut '), undefined, DialogModes.NO);
+                mTick('剪切', tS); tS = new Date().getTime();
+                try { srcDoc.selection.deselect(); } catch (eD) {}
+                subs.push(sub);
+                made.push({ name: cl.name, frac: cl.frac });
+            } catch (eP) {
+                try { srcDoc.selection.deselect(); } catch (eD2) {}
+                errors.push(cl.name + ' @' + stage2 + ': ' + (eP && eP.message ? eP.message : String(eP)));
+            }
+            try { mf.remove(); } catch (eR) {}
+        }
+        if (!subs.length) return { ok: false, err: '没有可拆分的类别', errors: errors, classes: clsList, contentN: cls.contentN, ms: ms, maskMs: maskMs };
+        tick('masks');
+        ms.maskDetail = maskMs;
+        /* 原层 → 组: 组名沿用原层名, 子层入组, 原层隐藏作备份放组内最底 */
+        var grpName = layer.name + '（内容拆分）';
+        var grp = null;
+        try {
+            grp = srcDoc.layerSets.add();
+            grp.name = grpName;
+            /* 组必须回到原图层的位置(否则会跑到图层栈最前, 后续折光层序全错) */
+            try { grp.move(layer, ElementPlacement.PLACEBEFORE); }
+            catch (eMv) { try { plog('警告: 拆分组归位失败(组会留在最前): ' + (eMv && eMv.message ? eMv.message : String(eMv))); } catch (eP2) {} }
+            for (var si = 0; si < subs.length; si++) moveIntoGroup(srcDoc, subs[si], grp);
+            layer.visible = false;
+            moveIntoGroup(srcDoc, layer, grp);
+        } catch (eG) {
+            return { ok: false, err: '建组失败: ' + (eG && eG.message ? eG.message : String(eG)), made: made };
+        }
+        return { ok: true, group: grpName, parts: made, ms: new Date().getTime() - t0, msParts: ms, useChar: cls.useChar };
+    }
     /* 取样用的临时文档只建一次并复用。
      * 原因: 逐层新建/关闭文档会在几十层后触发 Photoshop「不能创建新文档…没有足够的空间来停放它们」，
      * 一旦触发后续所有层都会失败(实测 17:28 那次 91 层全废)。复用同一个文档同时也更快。 */
@@ -2774,6 +3251,7 @@ var ZG_CORE_VERSION = '2026-09-18a';   // 便于在 zg_progress.txt 里确认实
     ZG.suggestFor = suggestFor;
     ZG.PATTERN_FAMILY = PATTERN_FAMILY;
     ZG.analyzeLayer = analyzeLayer;
+    ZG.splitLayer = splitLayer;
     ZG.sanitize = sanitize;
     ZG.num = num;
     ZG.pathReadInfo = function () { return pathReadInfo; };
@@ -2795,6 +3273,12 @@ var ZG_CORE_VERSION = '2026-09-18a';   // 便于在 zg_progress.txt 里确认实
         genDots: genDots,
         circleRibbon: circleRibbon,
         offsetPolyline: offsetPolyline,
+        renderLayerSmallRGB: renderLayerSmallRGB,
+        kmeansSmall: kmeansSmall,
+        buildParts: buildParts,
+        classifyParts: classifyParts,
+        writeMaskBMP: writeMaskBMP,
+        splitLayer: splitLayer,
         getRegionSubs: getRegionSubs,
         subsBBox: subsBBox,
         subsPxToPt: subsPxToPt,
